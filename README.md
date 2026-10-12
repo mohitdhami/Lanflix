@@ -12,7 +12,7 @@ You manage everything locally (users, content, analytics). No cloud, no subscrip
 | Home rows, hero billboard, Top 10 | ✅ Trending, New, Top 10, genre rows |
 | Search + genres + Movies / TV Shows | ✅ Instant search, genre chips |
 | Detail page + episodes + More like this | ✅ Modal with cast, ratings, seasons |
-| Player: resume, autoplay next, skip intro, subtitles | ✅ HTML5 + Range streaming, `.vtt` sidecars, next-episode countdown |
+| Player: resume, autoplay next, skip intro, subtitles | ✅ Custom Netflix-style player: play/pause, ±10s, seek bar + buffer, speed (0.5–2×), volume, CC menu, fullscreen, PiP, prev/next episode, episodes drawer, auto-hide, shortcuts, screen lock |
 | Continue Watching + progress sync per profile | ✅ Saved every 5s, resume prompt |
 | My List, 👍👎 ratings | ✅ Per-profile |
 | Kids mode | ✅ Hides 16+/18+ |
@@ -86,7 +86,7 @@ Supported video: `.mp4 .webm .mkv .mov .avi .m4v` • posters: `.jpg .png .webp`
 Open **🛠 CRM** in the top nav (admin only):
 - **Overview** — users, plays, storage used, 7-day chart, top content, restore-demo-catalog button
 - **Users** — create/disable/reset-password/delete users, change roles (LAN-only accounts; you can't demote/disable yourself)
-- **Content** — **add** titles (direct video links), edit metadata/sources/featured flag, manage series episodes, upload poster/backdrop, delete. Open any title's Edit to **attach more files** — drop files/folders or use Files…/Folder… pickers; episode uploads auto-create episode rows for series, video uploads link (or replace) the movie file
+- **Content** — **add** titles (direct video links), edit metadata/sources/featured flag, convert movie↔series, manage series episodes, upload poster/backdrop, delete. Open any title's Edit to **attach more files** — drop files/folders or use Files…/Folder… pickers; episode uploads auto-create episode rows for series, video uploads link (or replace) the movie file
 - **Views** — who watched what, when
 
 Data lives in `data/lanflix.db` (SQLite). Back it up by copying that file while the server is stopped.

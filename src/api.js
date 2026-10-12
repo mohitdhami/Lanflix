@@ -534,6 +534,23 @@ function registerApi(app) {
     res.json({ ok: true, ...r });
   });
 
+  // Change a title's type (e.g. added as movie, turns out to be a series).
+  // movie -> series is always safe (linked video stays stored, unused).
+  // series -> movie is refused while episodes exist (delete them first).
+  app.post('/api/admin/content/:id/convert', adminRequired, (req, res) => {
+    const c = db.prepare('SELECT * FROM content WHERE id=?').get(req.params.id);
+    if (!c) return res.status(404).json({ error: 'Not found' });
+    const to = req.body && req.body.type;
+    if (!['movie', 'series'].includes(to)) return res.status(400).json({ error: 'type must be movie or series' });
+    if (to === c.type) return res.json({ ok: true, unchanged: true });
+    if (c.type === 'series' && to === 'movie') {
+      const n = db.prepare('SELECT COUNT(*) n FROM episodes WHERE content_id=?').get(c.id).n;
+      if (n > 0) return res.status(400).json({ error: `Delete its ${n} episode(s) first` });
+    }
+    db.prepare('UPDATE content SET type=? WHERE id=?').run(to, c.id);
+    res.json({ ok: true, from: c.type, to });
+  });
+
   app.get('/api/admin/views', adminRequired, (req, res) => {
     const rows = db.prepare(`SELECT v.*, c.title, p.name as profile FROM views_log v LEFT JOIN content c ON c.id=v.content_id LEFT JOIN profiles p ON p.id=v.profile_id ORDER BY v.started_at DESC LIMIT 100`).all();
     res.json({ items: rows });

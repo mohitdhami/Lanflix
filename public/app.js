@@ -376,9 +376,10 @@ async function openDetail(id) {
         <div id="epwrap">${eps.map(e => hEp(e)).join('') || '<div class="empty">No episodes found. Add video files under media/series/' + esc(c.title) + '</div>'}</div></div>` : ''}
       ${more.length ? `<div class="ep-list"><h3>More Like This</h3><div class="more-row">${more.map(x => `<div class="card focusable" data-open="${x.id}">${posterImg(x)}<div class="cbody"><div class="ctitle">${esc(x.title)}</div></div></div>`).join('')}</div></div>` : ''}
     </div></div></div>`;
-  $('#mclose').onclick = closeModal;
-  $('#mback').onclick = (e) => { if (e.target.id === 'mback') closeModal(); };
-  $('#mplay').onclick = () => { closeModal(); playContent(c.id); };
+  if (!(history.state && history.state.n === window.__modalToken)) window.__modalToken = pushLayer('modal');
+  $('#mclose').onclick = () => modalExit(false);
+  $('#mback').onclick = (e) => { if (e.target.id === 'mback') modalExit(false); };
+  $('#mplay').onclick = () => { closeModal(); window.__modalToken = null; playContent(c.id); };
   const mt = $('#mtrailer');
   if (mt) mt.onclick = () => {
     const t = document.createElement('div');
@@ -417,6 +418,25 @@ function hEp(e) {
     <div class="play-mini">▶</div></div>`;
 }
 function closeModal() { $('#modal-root').innerHTML = ''; }
+// Layered history: player + detail push entries so the phone/system back
+// button closes the top layer instead of exiting the app.
+let histSeq = 0;
+function pushLayer(kind) {
+  try { history.pushState({ lanflix: kind, n: ++histSeq }, ''); } catch {}
+  return histSeq;
+}
+function consumeLayer(token) {
+  try { if (token && history.state && history.state.n === token) history.back(); } catch {}
+}
+function modalExit(fromPop) {
+  const t = window.__modalToken; window.__modalToken = null;
+  closeModal();
+  if (!fromPop) consumeLayer(t);
+}
+window.addEventListener('popstate', () => {
+  if ($('#player-root').innerHTML) { if (typeof window.__playerExit === 'function') window.__playerExit(true); return; }
+  if ($('#modal-root').innerHTML) modalExit(true);
+});
 
 /* ================= PLAYER ================= */
 let playerTimer = null, saveThrottle = 0;
@@ -435,12 +455,50 @@ async function playContent(contentId, episodeId = null) {
   const resumeFrom = !ep ? (c.progress?.position_sec || 0) : 0;
 
   $('#player-root').innerHTML = `
-  <div class="player">
-    <div class="player-top"><button class="back focusable" id="pback">←</button>
-      <div><div class="pt">${esc(c.title)}</div><div class="pe">${ep ? `S${ep.season} E${ep.episode} — ${esc(ep.title)}` : esc(c.maturity_rating || '') + ' • ' + (c.year || '')}</div></div></div>
-    <video id="vid" controls autoplay playsinline preload="auto" ${resumeFrom > 10 ? `data-resume="${resumeFrom}"` : ''}></video>
+  <div class="player" id="pp">
+    <div class="player-top" id="ptop"><button class="back focusable" id="pback">←</button>
+      <div><div class="pt">${esc(c.title)}</div><div class="pe">${ep ? `S${ep.season} E${ep.episode} — ${esc(ep.title)}` : esc(c.maturity_rating || '') + ' • ' + (c.year || '')}</div></div>
+      <div style="margin-left:auto;display:flex;gap:4px;align-items:center">
+        <button class="icon-btn focusable" id="punlock" style="display:none" title="Unlock (U)">🔓 Tap to unlock</button>
+        <button class="icon-btn focusable" id="plock" title="Lock controls (U)">🔒</button>
+        <button class="icon-btn focusable" id="phelpbtn" title="Shortcuts (?)">?</button>
+      </div></div>
+    <video id="vid" autoplay playsinline preload="auto"></video>
+    <div class="spin" id="pspin" style="display:none"></div>
+    <div class="flash" id="pflash"></div>
+    <div class="seekzone left" id="pzl"></div>
+    <div class="seekzone right" id="pzr"></div>
     <button class="skip-btn" id="pskip" style="display:none">Skip Intro ▶</button>
     <div class="next-toast" id="pnext" style="display:none"></div>
+    <div class="epdrawer" id="pepdraw" style="display:none"></div>
+    <div class="endcard" id="pend" style="display:none"></div>
+    <div class="phelp" id="phelpbox" style="display:none"><b>Keyboard shortcuts</b>
+      <table><tr><td><kbd>Space</kbd>/<kbd>K</kbd></td><td>Play / pause</td></tr>
+      <tr><td><kbd>←</kbd><kbd>→</kbd></td><td>∓ 10 sec</td></tr>
+      <tr><td><kbd>↑</kbd><kbd>↓</kbd></td><td>Volume</td></tr>
+      <tr><td><kbd>F</kbd></td><td>Fullscreen</td></tr><tr><td><kbd>M</kbd></td><td>Mute</td></tr>
+      <tr><td><kbd>N</kbd>/<kbd>P</kbd></td><td>Next / previous episode</td></tr>
+      <tr><td><kbd>U</kbd></td><td>Lock / unlock</td></tr><tr><td><kbd>?</kbd></td><td>This panel</td></tr>
+      <tr><td><kbd>Esc</kbd></td><td>Back</td></tr></table></div>
+    <div class="pctrl" id="pctrl">
+      <div class="pbar" id="pbar"><div class="pbuf" id="pbuf"></div><div class="pfill" id="pfill"></div><div class="ptip" id="ptip" style="display:none"></div></div>
+      <div class="prow">
+        <button class="pbtn focusable" id="pp-play" title="Play/pause (Space)">⏸</button>
+        ${c.type === 'series' ? `<button class="pbtn focusable" id="pp-prev" title="Previous (P)">⏮</button><button class="pbtn focusable" id="pp-next" title="Next episode (N)">⏭</button>` : ''}
+        <button class="pbtn focusable" id="pp-back" title="Back 10s (←)">↺<small>10</small></button>
+        <button class="pbtn focusable" id="pp-fwd" title="Forward 10s (→)">↻<small>10</small></button>
+        <span class="ptime"><span id="pcur">0:00</span> / <span id="pdur">0:00</span></span>
+        <span class="pspace"></span>
+        <button class="pbtn focusable" id="pp-cc" title="Subtitles">CC</button>
+        <button class="pbtn focusable" id="pp-speed" title="Playback speed">1×</button>
+        ${c.type === 'series' ? `<button class="pbtn focusable" id="pp-eps" title="Episodes">☰</button>` : ''}
+        <button class="pbtn focusable" id="pp-pip" title="Picture in picture">⧉</button>
+        <button class="pbtn focusable" id="pp-mute" title="Mute (M)">🔊</button>
+        <input type="range" id="pp-vol" class="focusable" min="0" max="1" step="0.05" value="1" title="Volume (↑↓)" />
+        <button class="pbtn focusable" id="pp-full" title="Fullscreen (F)">⛶</button>
+      </div>
+      <div class="ppop" id="ppop" style="display:none"></div>
+    </div>
   </div>`;
   const vid = $('#vid');
   vid.src = src;
@@ -452,22 +510,12 @@ async function playContent(contentId, episodeId = null) {
       t.kind = 'subtitles'; t.label = s.lang || `Sub ${i + 1}`; t.srclang = 'en'; t.src = s.url;
       vid.appendChild(t);
     });
-    if (vid.textTracks.length) {
-      const sel = document.createElement('select');
-      sel.className = 'subs-sel focusable';
-      const paint = () => {
-        sel.innerHTML = `<option value="-1">CC: Off</option>` + [...vid.textTracks].map((t, i) =>
-          `<option value="${i}" ${t.mode === 'showing' ? 'selected' : ''}>${esc(t.label || 'Track ' + (i + 1))}</option>`).join('');
-      };
-      paint();
-      sel.onchange = () => [...vid.textTracks].forEach((t, i) => t.mode = (i === Number(sel.value) ? 'showing' : 'disabled'));
-      $('.player').appendChild(sel);
-    }
+    if (vid.textTracks.length) vid.textTracks[0].mode = 'showing';
   } catch {}
   if (resumeFrom > 10) {
-    vid.onloadedmetadata = () => {
-      if (confirm(`Resume from ${fmtTime(resumeFrom)}?`)) vid.currentTime = resumeFrom;
-    };
+    const doResume = () => { try { vid.currentTime = resumeFrom; } catch {} toast(`Resumed from ${fmtTime(resumeFrom)}`); };
+    if (vid.readyState >= 1) doResume();
+    else vid.addEventListener('loadedmetadata', doResume, { once: true });
   }
   const save = (force = false) => {
     const now = Date.now();
@@ -476,16 +524,192 @@ async function playContent(contentId, episodeId = null) {
     if (!vid.duration || isNaN(vid.duration)) return;
     api('/api/progress', { method: 'POST', body: JSON.stringify({ profileId: pid, contentId: c.id, episodeId: ep?.id || null, position_sec: vid.currentTime, duration_sec: vid.duration }) }).catch(() => {});
   };
+  // ---------- custom player controls ----------
+  const isSeries = c.type === 'series';
+  const eps = isSeries ? (c.episodes || []) : [];
+  const epIdx = isSeries ? eps.findIndex(e => e.id === ep.id) : -1;
+  const prevEp = epIdx > 0 ? eps[epIdx - 1] : null;
+  const nextEp = epIdx >= 0 && epIdx < eps.length - 1 ? eps[epIdx + 1] : null;
+  const goEp = (target) => { if (!target) return; save(true); closePlayer(); playContent(c.id, target.id); };
+  let locked = false, hideT = null, seeking = false, menuOpen = false;
+  const $p = (id) => document.getElementById(id);
+  const wake = () => {
+    if (locked) return;
+    $p('pp').classList.remove('idle');
+    clearTimeout(hideT);
+    hideT = setTimeout(sleep, 3200);
+  };
+  const sleep = () => {
+    if (locked || vid.paused || seeking || menuOpen) return;
+    if ($p('pepdraw').style.display === 'block' || $p('phelpbox').style.display === 'block') return;
+    $p('pp').classList.add('idle');
+  };
+  const flash = (sym) => { const f = $p('pflash'); f.textContent = sym; f.classList.remove('show'); void f.offsetWidth; f.classList.add('show'); };
+  const syncPlayBtn = () => { $p('pp-play').textContent = vid.paused ? '▶' : '⏸'; };
+  const toggle = () => { const willPlay = vid.paused; if (willPlay) vid.play().catch(() => {}); else vid.pause(); flash(willPlay ? '▶' : '⏸'); syncPlayBtn(); };
+  const seekBy = (d) => {
+    if (locked) return;
+    if (!vid.duration || isNaN(vid.duration)) return;
+    vid.currentTime = Math.max(0, Math.min(vid.duration, vid.currentTime + d));
+    flash((d < 0 ? '↺ ' : '↻ ') + Math.abs(d)); wake();
+  };
+  // prefs
+  const SPEEDS = [0.5, 0.75, 1, 1.25, 1.5, 1.75, 2];
+  let speed = parseFloat(localStorage.getItem('lanflix_speed') || '1') || 1;
+  if (!SPEEDS.includes(speed)) speed = 1;
+  const applySpeed = () => { vid.playbackRate = speed; $p('pp-speed').textContent = String(speed).replace(/\.0$/, '') + '×'; };
+  const syncVol = () => {
+    $p('pp-vol').value = vid.muted ? 0 : vid.volume;
+    $p('pp-mute').textContent = (vid.muted || vid.volume === 0) ? '🔇' : '🔊';
+  };
+  const setVol = (v) => {
+    vid.volume = Math.max(0, Math.min(1, v));
+    vid.muted = vid.volume === 0;
+    localStorage.setItem('lanflix_vol', vid.volume);
+    localStorage.setItem('lanflix_mute', vid.muted ? '1' : '0');
+    syncVol();
+  };
+  vid.volume = parseFloat(localStorage.getItem('lanflix_vol') ?? '1');
+  if (isNaN(vid.volume)) vid.volume = 1;
+  vid.muted = localStorage.getItem('lanflix_mute') === '1';
+  // progress bar
+  const paintBar = () => {
+    const d = vid.duration || 0, t = vid.currentTime || 0;
+    $p('pfill').style.width = (d ? (t / d) * 100 : 0) + '%';
+    try { const b = vid.buffered; if (b.length && d) $p('pbuf').style.width = (b.end(b.length - 1) / d) * 100 + '%'; } catch {}
+    $p('pcur').textContent = fmtTime(t);
+    $p('pdur').textContent = fmtTime(d);
+  };
+  const bar = $p('pbar');
+  const ratioOf = (e) => { const r = bar.getBoundingClientRect(); return Math.max(0, Math.min(1, (e.clientX - r.left) / r.width)); };
+  bar.addEventListener('pointerdown', (e) => { seeking = true; try { bar.setPointerCapture(e.pointerId); } catch {} vid.currentTime = ratioOf(e) * (vid.duration || 0); paintBar(); });
+  bar.addEventListener('pointermove', (e) => {
+    const d = vid.duration || 0, tip = $p('ptip');
+    if (e.pointerType === 'mouse' && d) { tip.style.display = 'block'; tip.style.left = (ratioOf(e) * 100) + '%'; tip.textContent = fmtTime(ratioOf(e) * d); }
+    if (seeking && d) { vid.currentTime = ratioOf(e) * d; paintBar(); }
+  });
+  bar.addEventListener('pointerup', () => { seeking = false; wake(); });
+  bar.addEventListener('pointerleave', () => { $p('ptip').style.display = 'none'; });
+  // popups
+  const closeMenu = () => { $p('ppop').style.display = 'none'; menuOpen = false; wake(); };
+  const openMenu = (html) => { const m = $p('ppop'); m.innerHTML = html; m.style.display = 'block'; menuOpen = true; wake(); };
+  $p('pp-play').onclick = () => { toggle(); wake(); };
+  $p('pp-back').onclick = () => seekBy(-10);
+  $p('pp-fwd').onclick = () => seekBy(10);
+  if ($p('pp-prev')) $p('pp-prev').onclick = () => { if (vid.currentTime > 5 || !prevEp) vid.currentTime = 0; else goEp(prevEp); };
+  if ($p('pp-next')) $p('pp-next').onclick = () => goEp(nextEp);
+  $p('pp-speed').onclick = () => {
+    if (menuOpen) return closeMenu();
+    openMenu(SPEEDS.map(s => `<button data-s="${s}" class="${s === speed ? 'on' : ''}">${s}×${s === 1 ? ' (normal)' : ''}</button>`).join(''));
+    $$('#ppop [data-s]').forEach(b => b.onclick = () => { speed = parseFloat(b.dataset.s); localStorage.setItem('lanflix_speed', speed); applySpeed(); closeMenu(); });
+  };
+  const paintCc = () => {
+    const ts = [...vid.textTracks];
+    return `<button data-cc="-1" class="${ts.every(t => t.mode !== 'showing') ? 'on' : ''}">Off</button>` +
+      (ts.map((t, i) => `<button data-cc="${i}" class="${t.mode === 'showing' ? 'on' : ''}">${esc(t.label || 'Track ' + (i + 1))}</button>`).join('') || '<button disabled>No subtitles for this video</button>');
+  };
+  $p('pp-cc').onclick = () => {
+    if (menuOpen) return closeMenu();
+    openMenu(paintCc());
+    $$('#ppop [data-cc]').forEach(b => { if (b.disabled) return; b.onclick = () => { const i = Number(b.dataset.cc); [...vid.textTracks].forEach((t, j) => t.mode = (j === i ? 'showing' : 'disabled')); closeMenu(); }; });
+  };
+  if ($p('pp-eps')) $p('pp-eps').onclick = () => {
+    const d = $p('pepdraw');
+    if (d.style.display === 'block') { d.style.display = 'none'; menuOpen = false; wake(); return; }
+    closeMenu();
+    d.innerHTML = `<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px"><b>Episodes</b><button class="circle-btn" id="pep-x">✕</button></div>` +
+      eps.map(x => `<div class="eprow ${x.id === ep.id ? 'cur' : ''}" data-ep="${x.id}"><span style="color:#888">S${x.season} E${x.episode}</span><span style="flex:1">${esc(x.title)}</span><span style="color:#666">${fmtDur(x.duration_sec)}</span></div>`).join('');
+    d.style.display = 'block'; menuOpen = true; wake();
+    $p('pep-x').onclick = () => { d.style.display = 'none'; menuOpen = false; wake(); };
+    $$('#pepdraw [data-ep]').forEach(r => r.onclick = () => goEp(eps.find(x => x.id == r.dataset.ep)));
+  };
+  $p('pp-mute').onclick = () => { vid.muted = !vid.muted; localStorage.setItem('lanflix_mute', vid.muted ? '1' : '0'); syncVol(); wake(); };
+  $p('pp-vol').oninput = (e) => setVol(parseFloat(e.target.value));
+  $p('pp-full').onclick = () => { if (document.fullscreenElement) document.exitFullscreen().catch(() => {}); else $p('pp').requestFullscreen?.().catch(() => toast('Fullscreen blocked by browser')); };
+  $p('pp-pip').onclick = async () => { try { if (document.pictureInPictureElement) await document.exitPictureInPicture(); else await vid.requestPictureInPicture(); } catch { toast('Picture-in-picture not supported here'); } };
+  $p('phelpbtn').onclick = () => { const h = $p('phelpbox'); const open = h.style.display === 'block'; h.style.display = open ? 'none' : 'block'; menuOpen = !open; wake(); };
+  // lock
+  // lock: controls + taps go dead, but ← back and the unlock button stay live
+  const lock = () => {
+    locked = true; window.__playerLocked = true; closeMenu();
+    $p('pp').classList.add('locked');
+    $p('punlock').style.display = 'block'; $p('plock').style.display = 'none'; $p('phelpbtn').style.display = 'none';
+    document.activeElement?.blur(); toast('Locked — press U or tap 🔓 (← still works)');
+  };
+  const unlock = () => {
+    locked = false; window.__playerLocked = false;
+    $p('pp').classList.remove('locked');
+    $p('punlock').style.display = 'none'; $p('plock').style.display = 'block'; $p('phelpbtn').style.display = 'block';
+    wake();
+  };
+  $p('plock').onclick = lock;
+  $p('punlock').onclick = unlock;
+  // gestures + idle
+  vid.addEventListener('click', () => { wake(); if (!locked) toggle(); });
+  vid.addEventListener('dblclick', (e) => e.preventDefault());
+  // side zones: single tap toggles (like the rest of the video),
+  // double tap seeks — the second tap cancels the pending toggle.
+  let zTimer = null;
+  const zoneTap = (dir) => {
+    if (locked) return;
+    wake();
+    if (zTimer) { clearTimeout(zTimer); zTimer = null; seekBy(dir * 10); }
+    else zTimer = setTimeout(() => { zTimer = null; toggle(); }, 260);
+  };
+  $p('pzl').addEventListener('click', () => zoneTap(-1));
+  $p('pzr').addEventListener('click', () => zoneTap(1));
+  $p('pp').addEventListener('mousemove', wake);
+  $p('pp').addEventListener('touchstart', wake, { passive: true });
+  vid.addEventListener('waiting', () => $p('pspin').style.display = 'block');
+  vid.addEventListener('playing', () => { $p('pspin').style.display = 'none'; syncPlayBtn(); wake(); });
+  vid.addEventListener('pause', () => { syncPlayBtn(); wake(); });
+  vid.addEventListener('loadedmetadata', () => { applySpeed(); syncVol(); paintBar(); });
+  applySpeed(); syncVol();
+  // keyboard
+  const onKey = (e) => {
+    const tag = document.activeElement?.tagName;
+    if (locked) {
+      if (document.activeElement?.id === 'punlock' && (e.key === ' ' || e.key === 'Enter')) return; // native unlock click
+      if (e.key === 'u' || e.key === 'U' || e.key === 'Escape') unlock();
+      e.preventDefault(); return;
+    }
+    if (tag === 'INPUT' && e.key !== 'Escape') return;
+    if ((tag === 'BUTTON' || tag === 'SELECT') && e.key === 'Enter') return;
+    if ((tag === 'BUTTON' || tag === 'SELECT') && e.key === ' ') { toggle(); wake(); e.preventDefault(); return; }
+    const k = e.key;
+    if (k === ' ' || k === 'k' || k === 'K') { toggle(); wake(); e.preventDefault(); }
+    else if (k === 'ArrowLeft' || k === 'j' || k === 'J') { seekBy(-10); e.preventDefault(); }
+    else if (k === 'ArrowRight' || k === 'l' || k === 'L') { seekBy(10); e.preventDefault(); }
+    else if (k === 'ArrowUp') { setVol(vid.volume + 0.1); wake(); e.preventDefault(); }
+    else if (k === 'ArrowDown') { setVol(vid.volume - 0.1); wake(); e.preventDefault(); }
+    else if (k === 'f' || k === 'F') $p('pp-full').click();
+    else if (k === 'm' || k === 'M') $p('pp-mute').click();
+    else if ((k === 'n' || k === 'N') && nextEp) goEp(nextEp);
+    else if (k === 'p' || k === 'P') { const b = $p('pp-prev'); if (b) b.click(); else vid.currentTime = 0; }
+    else if (k === 'u' || k === 'U') lock();
+    else if (k === '?') $p('phelpbtn').click();
+  };
+  window.__pkey = onKey;
+  document.addEventListener('keydown', onKey);
+  wake();
   vid.ontimeupdate = () => {
     save();
+    paintBar();
     const sk = $('#pskip');
     if (sk) sk.style.display = (vid.currentTime < 90 && vid.duration > 180) ? 'block' : 'none';
-    // continue data refresh not needed
   };
   vid.onpause = () => save(true);
   const sk = $('#pskip');
   if (sk) sk.onclick = () => { vid.currentTime = Math.min(vid.duration - 5, Math.max(vid.currentTime + 60, 90)); };
-  $('#pback').onclick = () => { save(true); closePlayer(); if (S.view === 'home') renderMain(); };
+  window.__playerToken = pushLayer('player');
+  window.__playerExit = (fromPop) => {
+    const t = window.__playerToken; window.__playerToken = null;
+    try { save(true); } catch {}
+    closePlayer();
+    if (S.view === 'home') { try { renderMain(); } catch {} }
+    if (!fromPop) consumeLayer(t);
+  };
+  $('#pback').onclick = () => window.__playerExit(false);
   vid.onended = async () => {
     save(true);
     if (c.type === 'series') {
@@ -509,15 +733,27 @@ async function playContent(contentId, episodeId = null) {
         return;
       }
     }
-    toast('Finished ✓');
-    setTimeout(() => { closePlayer(); renderMain(); }, 800);
+    if (locked) unlock(); // never trap the user on the end screen
+    const box = $p('pend');
+    box.innerHTML = `<h2>${esc(c.title)}</h2><div style="color:#bbb;font-size:14px;margin-bottom:16px">${ep ? `S${ep.season} E${ep.episode} — ${esc(ep.title)} • finished` : 'Thanks for watching'}</div>
+      <div style="display:flex;gap:10px;justify-content:center;flex-wrap:wrap"><button class="btn btn-light focusable" id="pend-re">↺ Replay</button><button class="btn btn-ghost focusable" id="pend-back">← Back to browse</button></div>`;
+    box.style.display = 'flex'; wake(); clearTimeout(hideT);
+    $p('pend-re').onclick = () => { box.style.display = 'none'; vid.currentTime = 0; vid.play().catch(() => {}); };
+    $p('pend-back').onclick = () => { window.__playerExit(false); if (S.view !== 'home') renderMain(); };
   };
   vid.onerror = () => {
     if (vid.src.includes('/api/stream/')) toast('⚠ Cannot play this file — missing on the server, or an unsupported format like .mkv (use .mp4).');
   };
   vid.focus();
 }
-function closePlayer() { clearTimeout(playerTimer); $('#player-root').innerHTML = ''; }
+function closePlayer() {
+  clearTimeout(playerTimer);
+  if (window.__pkey) { document.removeEventListener('keydown', window.__pkey); window.__pkey = null; }
+  window.__playerLocked = false;
+  try { if (document.fullscreenElement) document.exitFullscreen().catch(() => {}); } catch {}
+  try { if (document.pictureInPictureElement) document.exitPictureInPicture().catch(() => {}); } catch {}
+  $('#player-root').innerHTML = '';
+}
 
 /* ================= ADMIN / CRM ================= */
 // Upload files into an existing title's folder (series → auto-creates episodes,
@@ -887,7 +1123,11 @@ async function viewAdmin() {
       $$('[data-cedit]', main).forEach(b => b.onclick = async () => {
         const c = items.find(x => x.id == b.dataset.cedit);
         const box = $('#ce-' + c.id);
-        box.innerHTML = `<div class="panel" style="margin-top:8px;min-width:280px"><div class="form-grid">
+        box.innerHTML = `<div class="panel" style="margin-top:8px;min-width:280px">
+        <div style="display:flex;gap:8px;align-items:center;margin-bottom:10px">
+          <span class="pill">${c.type === 'series' ? '📺 series' : '🎬 movie'}</span>
+          <button class="btn btn-ghost btn-sm" id="conv-${c.id}">Convert to ${c.type === 'series' ? 'movie' : 'series'}</button>
+        </div><div class="form-grid">
           <input class="tbl-input full" id="f-t-${c.id}" value="${esc(c.title)}" placeholder="Title" />
           <input class="tbl-input" id="f-y-${c.id}" value="${c.year || ''}" placeholder="Year" />
           <input class="tbl-input" id="f-m-${c.id}" value="${esc(c.maturity_rating)}" placeholder="Maturity" />
@@ -905,6 +1145,18 @@ async function viewAdmin() {
           ${c.type === 'series' ? `<div class="full" id="eps-${c.id}" style="border-top:1px solid #333;padding-top:10px">Loading episodes…</div>` : ''}
           </div><div style="margin-top:10px"><button class="btn btn-red btn-sm" id="f-go-${c.id}">Save</button></div></div>`;
         if (c.type === 'series') renderEpManager(c.id);
+        $('#conv-' + c.id).onclick = async () => {
+          const to = c.type === 'series' ? 'movie' : 'series';
+          const warn = to === 'movie'
+            ? 'Convert this series to a single movie? (Refused if it still has episodes.)'
+            : 'Convert this movie to a series? Its linked video (if any) stays stored but unused; you can then add episodes.';
+          if (!confirm(warn)) return;
+          try {
+            await api('/api/admin/content/' + c.id + '/convert', { method: 'POST', body: JSON.stringify({ type: to }) });
+            toast(`Converted to ${to} — reopen Edit to manage it`);
+            viewAdmin();
+          } catch (e) { toast(e.message); }
+        };
         if (c.type === 'movie') wireTitleDrop('m' + c.id, (files, setStatus, done) => {
           const hasVideo = c.video_path || c.remote_url;
           if (hasVideo && !confirm('Replace the current video with the uploaded file?')) return;
@@ -948,12 +1200,14 @@ window.addEventListener('drop', (e) => e.preventDefault());
 document.addEventListener('keydown', (e) => {
   // player back
   if ($('#player-root').innerHTML && (e.key === 'Escape' || e.key === 'BrowserBack' || e.key === 'Backspace')) {
+    if (window.__playerLocked) return; // locked: only U / tap unlocks (player owns it)
     const v = $('#vid'); if (v && document.activeElement?.tagName === 'INPUT') return;
     e.preventDefault(); $('#pback')?.click(); return;
   }
-  if ($('#modal-root').innerHTML && e.key === 'Escape') { closeModal(); return; }
-  // arrows: move focus spatially (TV friendly)
+  if ($('#modal-root').innerHTML && e.key === 'Escape') { modalExit(false); return; }
+  // arrows: move focus spatially (TV friendly) — the player owns arrows while open
   if (['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(e.key)) {
+    if ($('#player-root').innerHTML) return;
     const f = $$('.focusable, button, input, select, [tabindex]').filter(el => el.offsetParent !== null);
     if (!f.length) return;
     const cur = document.activeElement;
