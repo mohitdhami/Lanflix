@@ -133,6 +133,7 @@ function renderGate(manage = false) {
         if (v !== p.pin) return toast('Wrong PIN');
       }
       S.profile = p; store.profile = p;
+      S.view = 'home';
       renderMain();
     };
   });
@@ -192,9 +193,14 @@ function shell(active, inner) {
       ${S.user?.role === 'admin' ? `<span data-v="admin" class="${active === 'admin' ? 'active' : ''}">🛠 CRM</span>` : ''}
     </div>
     <div class="nav-right">
-      <div class="nav-search"><input id="nav-q" class="focusable" placeholder="🔍 Titles…" value="${esc(S.search)}" /></div>
-      <button class="icon-btn focusable" id="nav-switch" title="Switch profile">${esc(S.profile?.avatar || '👤')}</button>
-      <button class="icon-btn focusable" id="nav-out" title="Sign out">⏻</button>
+      <div class="nav-search" id="nav-search">
+        <span class="s-ico"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg></span>
+        <input id="nav-q" class="focusable" placeholder="Search titles…" value="${esc(S.search)}" autocomplete="off" />
+        <kbd>/</kbd>
+        <button class="nav-clear" id="nav-clear" title="Clear">✕</button>
+      </div>
+      <button class="focusable" id="nav-switch" title="Switch profile (${esc(S.profile?.name || '')})">${esc(S.profile?.avatar || '👤')}</button>
+      <button class="focusable" id="nav-out" title="Sign out">⏻</button>
     </div>
   </nav>
   <div id="view">${inner}</div>
@@ -202,13 +208,32 @@ function shell(active, inner) {
 }
 
 function bindShell(active) {
-  $$('#app [data-v]').forEach(el => el.onclick = () => nav(el.dataset.v));
+  $$('#app [data-v]').forEach(el => {
+    el.onclick = () => nav(el.dataset.v);
+    el.classList.toggle('active', el.dataset.v === active);
+  });
   $('#nav-logo').onclick = () => nav('home');
   $('#nav-switch').onclick = () => renderGate();
   $('#nav-out').onclick = () => { store.token = null; store.profile = null; S.user = null; S.profile = null; renderAuth(); };
   const q = $('#nav-q');
-  q.onkeydown = (e) => { if (e.key === 'Enter') { S.search = q.value.trim(); nav('search'); } };
-  q.oninput = () => { S.search = q.value.trim(); };
+  const wrap = $('#nav-search');
+  const clearBtn = $('#nav-clear');
+  const paintSearch = () => wrap?.classList.toggle('has-text', !!(q && q.value));
+  if (q) {
+    // preserve typing focus across slide transitions: only sync when not focused
+    if (document.activeElement !== q && q.value !== (S.search || '')) q.value = S.search || '';
+    paintSearch();
+  }
+  q.onkeydown = (e) => { if (e.key === 'Enter') { S.search = q.value.trim(); nav('search'); } else if (e.key === 'Escape') { q.blur(); } };
+  q.oninput = () => { S.search = q.value.trim(); paintSearch(); };
+  if (clearBtn) clearBtn.onclick = (e) => { e.stopPropagation(); q.value = ''; S.search = ''; paintSearch(); q.focus(); if (S.view === 'search') viewSearch(); };
+  if (!window.__navKey) {
+    window.__navKey = (e) => {
+      if ($('#player-root')?.innerHTML || $('#modal-root')?.innerHTML) return;
+      if (e.key === '/' && !/INPUT|TEXTAREA|SELECT/.test(document.activeElement?.tagName || '')) { e.preventDefault(); $('#nav-q')?.focus(); }
+    };
+    document.addEventListener('keydown', window.__navKey);
+  }
   window.onscroll = () => $('#nav')?.classList.toggle('solid', window.scrollY > 30);
 }
 
@@ -218,17 +243,49 @@ function nav(v) {
 }
 
 async function renderMain() {
-  if (!S.profile) return renderGate();
-  $('#app').innerHTML = shell(S.view, `<div class="page"><div class="empty">Loading…</div></div>`);
-  bindShell(S.view);
+  if (!S.profile) { S._currentView = null; return renderGate(); }
+  // safety net: auth/gate states must never reach the browse shell — land on home
+  if (!['home', 'series', 'movies', 'mylist', 'search', 'admin'].includes(S.view)) S.view = 'home';
+  const order = ['home', 'series', 'movies', 'mylist', 'search', 'admin'];
+  const prev = S._currentView;
+  const myView = S.view;
+  let dir = 0;
+  if (prev && prev !== myView) {
+    const a = order.indexOf(prev), b = order.indexOf(myView);
+    dir = (a >= 0 && b >= 0) ? (b > a ? 1 : -1) : 1;
+  }
+  const navReady = !!($('#nav') && $('#view'));
+  if (!navReady) {
+    $('#app').innerHTML = shell(myView, `<div class="page">
+      <div class="skel" style="height:46vh;margin-bottom:22px"></div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:14px">
+        ${'<div class="skel" style="height:240px"></div>'.repeat(6)}
+      </div></div>`);
+    bindShell(myView);
+  } else {
+    bindShell(myView); // instant active-pill update, keeps old page visible (no Loading flash)
+    document.body.classList.add('navigating');
+  }
+  S._currentView = myView;
   try {
-    if (S.view === 'home') await viewHome();
-    else if (S.view === 'series') await viewType('series');
-    else if (S.view === 'movies') await viewType('movie');
-    else if (S.view === 'mylist') await viewMyList();
-    else if (S.view === 'search') await viewSearch();
-    else if (S.view === 'admin') await viewAdmin();
-  } catch (e) { $('#view').innerHTML = `<div class="page"><div class="empty">Error: ${esc(e.message)}</div></div>`; }
+    if (myView === 'home') await viewHome();
+    else if (myView === 'series') await viewType('series');
+    else if (myView === 'movies') await viewType('movie');
+    else if (myView === 'mylist') await viewMyList();
+    else if (myView === 'search') await viewSearch();
+    else if (myView === 'admin') await viewAdmin();
+  } catch (e) {
+    if (S.view !== myView) { document.body.classList.remove('navigating'); renderMain(); return; }
+    $('#view').innerHTML = `<div class="page"><div class="empty">Error: ${esc(e.message)}</div></div>`;
+  }
+  document.body.classList.remove('navigating');
+  // stale race: a newer nav already started → re-render the current view instead of animating old content
+  if (S.view !== myView) { renderMain(); return; }
+  // slider entrance for the fresh page
+  if (dir && !window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+    const v = $('#view');
+    if (v) { v.classList.remove('slide-l', 'slide-r'); void v.offsetWidth; v.classList.add(dir > 0 ? 'slide-l' : 'slide-r'); }
+  }
 }
 
 /* ================= HOME ================= */
@@ -386,7 +443,7 @@ async function openDetail(id) {
   if (!(history.state && history.state.n === window.__modalToken)) window.__modalToken = pushLayer('modal');
   $('#mclose').onclick = () => modalExit(false);
   $('#mback').onclick = (e) => { if (e.target.id === 'mback') modalExit(false); };
-  $('#mplay').onclick = () => { closeModal(); window.__modalToken = null; playContent(c.id, c.type === 'series' && resumeEp ? resumeEp.id : undefined); };
+  $('#mplay').onclick = () => { closeModal(); playContent(c.id, c.type === 'series' && resumeEp ? resumeEp.id : undefined); };
   const mt = $('#mtrailer');
   if (mt) mt.onclick = () => {
     const t = document.createElement('div');
@@ -449,6 +506,142 @@ window.addEventListener('popstate', () => {
   if ($('#modal-root').innerHTML) modalExit(true);
 });
 
+/* ================= AUDIO FX ENGINE (WebAudio: volume boost, reverb, vocal, instrument) ================= */
+const AudioFX = (() => {
+  const DEF = { vol: 1, reverb: false, reverbAmt: 0.35, reverbPreset: 'hall', vocal: false, inst: false, night: false };
+  let S_fx = { ...DEF };
+  try { Object.assign(S_fx, JSON.parse(localStorage.getItem('lanflix_fx') || '{}')); } catch {}
+  try { const v = parseFloat(localStorage.getItem('lanflix_vol')); if (Number.isFinite(v)) S_fx.vol = Math.max(0, Math.min(2, v)); } catch {}
+  let ctx = null, src = null, curVid = null;
+  let input, bass, mid, treble, comp, dry, convolver, wet, master, analyser;
+  const PRESETS = {
+    studio: { dur: 0.7, decay: 2.6, label: 'Studio — tight' },
+    room: { dur: 1.4, decay: 2.1, label: 'Room — natural' },
+    hall: { dur: 2.8, decay: 2.3, label: 'Hall — cinematic' },
+    cathedral: { dur: 4.5, decay: 1.9, label: 'Cathedral — huge' },
+  };
+  const persist = () => {
+    try {
+      localStorage.setItem('lanflix_vol', String(S_fx.vol));
+      localStorage.setItem('lanflix_mute', S_fx.vol === 0 ? '1' : '0');
+      localStorage.setItem('lanflix_fx', JSON.stringify({ reverb: S_fx.reverb, reverbAmt: S_fx.reverbAmt, reverbPreset: S_fx.reverbPreset, vocal: S_fx.vocal, inst: S_fx.inst, night: S_fx.night }));
+    } catch {}
+  };
+  function makeIR(dur, decay) {
+    const rate = ctx.sampleRate, len = Math.floor(rate * dur);
+    const buf = ctx.createBuffer(2, len, rate);
+    for (let ch = 0; ch < 2; ch++) {
+      const d = buf.getChannelData(ch);
+      for (let i = 0; i < len; i++) {
+        const t = i / len;
+        d[i] = (Math.random() * 2 - 1) * Math.pow(1 - t, decay);
+      }
+    }
+    return buf;
+  }
+  function buildGraph() {
+    input = ctx.createGain();
+    bass = ctx.createBiquadFilter(); bass.type = 'lowshelf'; bass.frequency.value = 250;
+    mid = ctx.createBiquadFilter(); mid.type = 'peaking'; mid.frequency.value = 2000; mid.Q.value = 0.9;
+    treble = ctx.createBiquadFilter(); treble.type = 'highshelf'; treble.frequency.value = 7500;
+    comp = ctx.createDynamicsCompressor();
+    dry = ctx.createGain();
+    convolver = ctx.createConvolver();
+    wet = ctx.createGain();
+    master = ctx.createGain();
+    analyser = ctx.createAnalyser(); analyser.fftSize = 64; analyser.smoothingTimeConstant = 0.78;
+    input.connect(bass); bass.connect(mid); mid.connect(treble); treble.connect(comp);
+    comp.connect(dry); dry.connect(master);
+    comp.connect(convolver); convolver.connect(wet); wet.connect(master);
+    master.connect(analyser); analyser.connect(ctx.destination);
+  }
+  function applyAll() {
+    if (!ctx) return;
+    const t = ctx.currentTime;
+    master.gain.setTargetAtTime(S_fx.vol, t, 0.02);
+    // EQ: vocal boosts dialogue mids, instrument gives V-shape for music
+    const low = (S_fx.inst ? 5 : 0);
+    const high = (S_fx.inst ? 5 : 0);
+    const m = (S_fx.vocal ? 7 : 0) + (S_fx.inst ? -2 : 0);
+    bass.gain.setTargetAtTime(low, t, 0.05);
+    mid.gain.setTargetAtTime(m, t, 0.05);
+    treble.gain.setTargetAtTime(high, t, 0.05);
+    // night mode: aggressive compression for even loud scenes
+    if (S_fx.night) {
+      comp.threshold.setTargetAtTime(-30, t, 0.05); comp.knee.setTargetAtTime(12, t, 0.05);
+      comp.ratio.setTargetAtTime(14, t, 0.05); comp.attack.setTargetAtTime(0.003, t, 0.05);
+      comp.release.setTargetAtTime(0.28, t, 0.05);
+    } else {
+      comp.threshold.setTargetAtTime(-14, t, 0.05); comp.knee.setTargetAtTime(24, t, 0.05);
+      comp.ratio.setTargetAtTime(3, t, 0.05); comp.attack.setTargetAtTime(0.008, t, 0.05);
+      comp.release.setTargetAtTime(0.24, t, 0.05);
+    }
+    // reverb
+    dry.gain.setTargetAtTime(S_fx.reverb ? 1 - S_fx.reverbAmt * 0.35 : 1, t, 0.05);
+    wet.gain.setTargetAtTime(S_fx.reverb ? S_fx.reverbAmt * 0.9 : 0, t, 0.05);
+  }
+  function setPreset(name) {
+    if (!ctx || !PRESETS[name]) return;
+    const p = PRESETS[name];
+    convolver.buffer = makeIR(p.dur, p.decay);
+  }
+  return {
+    PRESETS, DEF,
+    get state() { return S_fx; },
+    ensure() {
+      if (!ctx) {
+        const AC = window.AudioContext || window.webkitAudioContext;
+        if (!AC) return false;
+        ctx = new AC();
+        buildGraph();
+        setPreset(S_fx.reverbPreset || 'hall');
+        applyAll();
+      }
+      if (ctx.state === 'suspended') ctx.resume().catch(() => {});
+      return true;
+    },
+    attach(vid) {
+      if (!this.ensure()) return false;
+      try {
+        if (curVid === vid && src) { applyAll(); return true; }
+        this.detach();
+        // route element through graph; keep element at full volume, control via master gain
+        src = ctx.createMediaElementSource(vid);
+        src.connect(input);
+        curVid = vid;
+        try { vid.volume = 1; vid.muted = false; } catch {}
+        applyAll();
+        return true;
+      } catch (e) {
+        // already-attached element (reused) — fall back to element volume
+        return false;
+      }
+    },
+    detach() {
+      try { src && src.disconnect(); } catch {}
+      src = null; curVid = null;
+    },
+    setVol(v) {
+      S_fx.vol = Math.max(0, Math.min(2, Number(v) || 0));
+      persist(); applyAll();
+    },
+    set(key, val) {
+      S_fx[key] = val; persist(); applyAll();
+      if (key === 'reverbPreset') setPreset(val);
+    },
+    reset() {
+      const v = S_fx.vol;
+      S_fx = { ...DEF, vol: v };
+      persist(); setPreset(S_fx.reverbPreset); applyAll();
+    },
+    freqData(arr) {
+      if (!analyser || !arr) return;
+      try { analyser.getByteFrequencyData(arr); } catch {}
+    },
+    get activeCount() { return (S_fx.reverb ? 1 : 0) + (S_fx.vocal ? 1 : 0) + (S_fx.inst ? 1 : 0) + (S_fx.night ? 1 : 0); },
+  };
+})();
+
 /* ================= PLAYER ================= */
 let playerTimer = null, saveThrottle = 0;
 async function playContent(contentId, episodeId = null) {
@@ -506,11 +699,34 @@ async function playContent(contentId, episodeId = null) {
         <button class="pbtn focusable" id="pp-speed" title="Playback speed">1×</button>
         ${c.type === 'series' ? `<button class="pbtn focusable" id="pp-eps" title="Episodes">☰</button>` : ''}
         <button class="pbtn focusable" id="pp-pip" title="Picture in picture">⧉</button>
-        <button class="pbtn focusable" id="pp-mute" title="Mute (M)">🔊</button>
-        <input type="range" id="pp-vol" class="focusable" min="0" max="1" step="0.05" value="1" title="Volume (↑↓)" />
+        <div class="vol-wrap" id="vol-wrap">
+          <button class="pbtn vol-btn focusable" id="pp-mute" title="Mute (M)">🔊</button>
+          <div class="vol-slider-wrap">
+            <input type="range" id="pp-vol" class="focusable" min="0" max="2" step="0.01" value="1" title="Volume (↑↓) — up to 200% boost" />
+            <span class="vol-pct" id="vol-pct">100%</span>
+          </div>
+          <button class="pbtn fx-btn focusable" id="pp-fx" title="Audio effects: reverb, vocal, instrument">✨<span class="dot"></span></button>
+        </div>
         <button class="pbtn focusable" id="pp-full" title="Fullscreen (F)">⛶</button>
       </div>
       <div class="ppop" id="ppop" style="display:none"></div>
+      <div class="fxpanel" id="fxpanel" style="display:none">
+        <h4>✨ Audio FX <button class="x" id="fx-x" title="Close">✕</button></h4>
+        <div class="fx-sub">Studio effects — applied live, saved per device</div>
+        <canvas class="fx-viz" id="fxviz" width="296" height="44"></canvas>
+        <div class="fx-vol-big"><span style="font-size:18px">🔊</span><input type="range" id="fx-vol" class="fx-mini-slider" min="0" max="2" step="0.01" value="1" /><b id="fx-vol-pct">100%</b></div>
+        <div class="fx-row" id="fx-row-reverb"><div class="fx-ico">🏛️</div><div class="fx-meta"><b>Reverb</b><span>Cinematic space & depth</span></div><button class="switch" id="fx-reverb" aria-label="Reverb"></button></div>
+        <div class="fx-subrow" id="fx-reverb-opts" style="display:none">
+          <label><span>Amount</span><span id="fx-rev-val">35%</span></label>
+          <input type="range" id="fx-rev-amt" class="fx-mini-slider" min="0" max="0.8" step="0.01" value="0.35" />
+          <label><span style="margin-top:6px">Space</span></label>
+          <select id="fx-rev-preset"><option value="studio">Studio — tight</option><option value="room">Room — natural</option><option value="hall">Hall — cinematic</option><option value="cathedral">Cathedral — huge</option></select>
+        </div>
+        <div class="fx-row" id="fx-row-vocal"><div class="fx-ico">🎙️</div><div class="fx-meta"><b>Vocal clarity</b><span>Boost dialogue +7dB @ 2kHz</span></div><button class="switch" id="fx-vocal" aria-label="Vocal"></button></div>
+        <div class="fx-row" id="fx-row-inst"><div class="fx-ico">🎸</div><div class="fx-meta"><b>Instrument / Music</b><span>V-shape: bass + treble lift</span></div><button class="switch" id="fx-inst" aria-label="Instrument"></button></div>
+        <div class="fx-row" id="fx-row-night"><div class="fx-ico">🌙</div><div class="fx-meta"><b>Night mode</b><span>Tame loud scenes</span></div><button class="switch" id="fx-night" aria-label="Night"></button></div>
+        <div class="fx-foot"><button id="fx-reset">Reset FX</button><button id="fx-done">Done</button></div>
+      </div>
     </div>
   </div>`;
   const vid = $('#vid');
@@ -559,6 +775,7 @@ async function playContent(contentId, episodeId = null) {
   const sleep = () => {
     if (locked || vid.paused || seeking || menuOpen) return;
     if ($p('pepdraw').style.display === 'block' || $p('phelpbox').style.display === 'block') return;
+    if ($p('fxpanel') && $p('fxpanel').style.display === 'block') return;
     $p('pp').classList.add('idle');
   };
   const flash = (sym) => { const f = $p('pflash'); f.textContent = sym; f.classList.remove('show'); void f.offsetWidth; f.classList.add('show'); };
@@ -575,20 +792,76 @@ async function playContent(contentId, episodeId = null) {
   let speed = parseFloat(localStorage.getItem('lanflix_speed') || '1') || 1;
   if (!SPEEDS.includes(speed)) speed = 1;
   const applySpeed = () => { vid.playbackRate = speed; $p('pp-speed').textContent = String(speed).replace(/\.0$/, '') + '×'; };
-  const syncVol = () => {
-    $p('pp-vol').value = vid.muted ? 0 : vid.volume;
-    $p('pp-mute').textContent = (vid.muted || vid.volume === 0) ? '🔇' : '🔊';
+  // ---- premium volume (0–200% boost via WebAudio, fallback to element volume) ----
+  let fxAttached = false;
+  const curVol = () => AudioFX.state.vol;
+  const volIcon = (v) => v === 0 ? '🔇' : v < 0.35 ? '🔈' : v < 0.9 ? '🔉' : v <= 1.01 ? '🔊' : '📢';
+  const paintVolUI = (v) => {
+    const pct = Math.round(v * 100);
+    const slider = $p('pp-vol'), lab = $p('vol-pct');
+    if (slider) {
+      slider.value = v;
+      const fill = (v / 2) * 100;
+      slider.style.background = `linear-gradient(90deg,var(--red) ${fill}%,rgba(255,255,255,.25) ${fill}%)`;
+    }
+    if (lab) { lab.textContent = pct + '%'; lab.classList.toggle('hot', v > 1.01); }
+    const mb = $p('pp-mute');
+    if (mb) { mb.textContent = volIcon(v); mb.classList.toggle('boost', v > 1.01); mb.title = v > 1.01 ? `Volume boosted ${pct}% (M to mute)` : 'Mute (M)'; }
+    const fv = $p('fx-vol'), fvp = $p('fx-vol-pct');
+    if (fv && document.activeElement !== fv) fv.value = v;
+    if (fvp) fvp.textContent = pct + '%';
   };
-  const setVol = (v) => {
-    vid.volume = Math.max(0, Math.min(1, v));
-    vid.muted = vid.volume === 0;
-    localStorage.setItem('lanflix_vol', vid.volume);
-    localStorage.setItem('lanflix_mute', vid.muted ? '1' : '0');
+  const syncVol = () => {
+    if (fxAttached) paintVolUI(curVol());
+    else {
+      const v = vid.muted ? 0 : vid.volume;
+      paintVolUI(Math.min(1, v));
+      // keep slider within 0..1 look when no FX
+      const s = $p('pp-vol'); if (s) s.style.background = `linear-gradient(90deg,var(--red) ${v * 100}%,rgba(255,255,255,.25) ${v * 100}%)`;
+    }
+  };
+  const setVol = (v, opts = {}) => {
+    v = Math.max(0, Math.min(2, Number(v) || 0));
+    // snap tiny values to 0
+    if (v < 0.02) v = 0;
+    if (fxAttached) {
+      AudioFX.setVol(v);
+      try { vid.muted = false; vid.volume = 1; } catch {}
+      paintVolUI(v);
+    } else {
+      const cv = Math.max(0, Math.min(1, v));
+      vid.volume = cv;
+      vid.muted = cv === 0;
+      try {
+        localStorage.setItem('lanflix_vol', String(cv));
+        localStorage.setItem('lanflix_mute', vid.muted ? '1' : '0');
+      } catch {}
+      paintVolUI(cv);
+      // keep slider fill in 0..1 range when no FX engine
+      const s = $p('pp-vol'); if (s) s.style.background = `linear-gradient(90deg,var(--red) ${cv * 100}%,rgba(255,255,255,.25) ${cv * 100}%)`;
+      if (!opts.silent) flash(cv === 0 ? '🔇' : Math.round(cv * 100) + '%');
+      return;
+    }
+    if (!opts.silent) flash(v === 0 ? '🔇' : Math.round(v * 100) + '%');
+  };
+  const attachAudio = () => {
+    try {
+      if (AudioFX.attach(vid)) {
+        fxAttached = true;
+        // migrate legacy 0..1 stored vol
+        AudioFX.setVol(AudioFX.state.vol);
+        try { vid.muted = false; vid.volume = 1; } catch {}
+      } else {
+        fxAttached = false;
+        const legacy = parseFloat(localStorage.getItem('lanflix_vol') ?? '1');
+        vid.volume = Number.isFinite(legacy) ? Math.max(0, Math.min(1, legacy)) : 1;
+        vid.muted = localStorage.getItem('lanflix_mute') === '1';
+      }
+    } catch {
+      fxAttached = false;
+    }
     syncVol();
   };
-  vid.volume = parseFloat(localStorage.getItem('lanflix_vol') ?? '1');
-  if (isNaN(vid.volume)) vid.volume = 1;
-  vid.muted = localStorage.getItem('lanflix_mute') === '1';
   // progress bar
   const paintBar = () => {
     const d = vid.duration || 0, t = vid.currentTime || 0;
@@ -608,8 +881,19 @@ async function playContent(contentId, episodeId = null) {
   bar.addEventListener('pointerup', () => { seeking = false; wake(); });
   bar.addEventListener('pointerleave', () => { $p('ptip').style.display = 'none'; });
   // popups
-  const closeMenu = () => { $p('ppop').style.display = 'none'; menuOpen = false; wake(); };
-  const openMenu = (html) => { const m = $p('ppop'); m.innerHTML = html; m.style.display = 'block'; menuOpen = true; wake(); };
+  const closeMenu = () => {
+    $p('ppop').style.display = 'none';
+    const fx = $p('fxpanel');
+    if (fx) fx.style.display = 'none';
+    $p('pp-fx')?.classList.toggle('active', AudioFX.activeCount > 0);
+    try { window.__fxCleanup && window.__fxCleanup(); } catch {}
+    menuOpen = false; wake();
+  };
+  const openMenu = (html) => {
+    const fx = $p('fxpanel'); if (fx) fx.style.display = 'none';
+    try { window.__fxCleanup && window.__fxCleanup(); } catch {}
+    const m = $p('ppop'); m.innerHTML = html; m.style.display = 'block'; menuOpen = true; wake();
+  };
   $p('pp-play').onclick = () => { toggle(); wake(); };
   $p('pp-back').onclick = () => seekBy(-10);
   $p('pp-fwd').onclick = () => seekBy(10);
@@ -640,8 +924,98 @@ async function playContent(contentId, episodeId = null) {
     $p('pep-x').onclick = () => { d.style.display = 'none'; menuOpen = false; wake(); };
     $$('#pepdraw [data-ep]').forEach(r => r.onclick = () => goEp(eps.find(x => x.id == r.dataset.ep)));
   };
-  $p('pp-mute').onclick = () => { vid.muted = !vid.muted; localStorage.setItem('lanflix_mute', vid.muted ? '1' : '0'); syncVol(); wake(); };
-  $p('pp-vol').oninput = (e) => setVol(parseFloat(e.target.value));
+  $p('pp-mute').onclick = () => {
+    const v = curVol();
+    if (fxAttached) {
+      if (v > 0) { window.__prevVol = v > 0.02 ? v : 1; setVol(0, { silent: true }); flash('🔇'); }
+      else setVol(window.__prevVol || 1);
+    } else { vid.muted = !vid.muted; try { localStorage.setItem('lanflix_mute', vid.muted ? '1' : '0'); } catch {} syncVol(); }
+    wake();
+  };
+  // ---------- Audio FX panel ----------
+  $p('pp-vol').oninput = (e) => { setVol(parseFloat(e.target.value), { silent: true }); wake(); };
+  $p('pp-vol').onchange = () => syncVol();
+  const fxOpen = () => {
+    const p = $p('fxpanel');
+    if (p.style.display === 'block') { fxClose(); return; }
+    $p('ppop').style.display = 'none';
+    p.style.display = 'block'; menuOpen = true;
+    $p('pp-fx')?.classList.add('active');
+    paintFx(); startViz(); wake();
+    clearTimeout(hideT);
+  };
+  const fxClose = () => {
+    $p('fxpanel').style.display = 'none';
+    $p('pp-fx')?.classList.toggle('active', AudioFX.activeCount > 0);
+    stopViz(); menuOpen = false; wake();
+  };
+  const paintFx = () => {
+    const st = AudioFX.state;
+    const sw = (id, on, row) => { const b = $p(id); if (b) b.classList.toggle('on', !!on); const r = row && $p(row); if (r) r.classList.toggle('on', !!on); };
+    sw('fx-reverb', st.reverb, 'fx-row-reverb'); sw('fx-vocal', st.vocal, 'fx-row-vocal');
+    sw('fx-inst', st.inst, 'fx-row-inst'); sw('fx-night', st.night, 'fx-row-night');
+    if ($p('fx-reverb-opts')) $p('fx-reverb-opts').style.display = st.reverb ? 'block' : 'none';
+    if ($p('fx-rev-amt')) $p('fx-rev-amt').value = st.reverbAmt;
+    if ($p('fx-rev-val')) $p('fx-rev-val').textContent = Math.round((st.reverbAmt / 0.8) * 100) + '%';
+    if ($p('fx-rev-preset')) $p('fx-rev-preset').value = st.reverbPreset;
+    if ($p('fx-vol')) $p('fx-vol').value = st.vol;
+    if ($p('fx-vol-pct')) $p('fx-vol-pct').textContent = Math.round(st.vol * 100) + '%';
+    paintVolUI(st.vol);
+    const n = AudioFX.activeCount;
+    const dot = document.querySelector('#pp-fx .dot');
+    if (dot) dot.style.display = n ? 'block' : 'none';
+    $p('pp-fx')?.classList.toggle('active', n > 0 || $p('fxpanel').style.display === 'block');
+  };
+  $p('pp-fx').onclick = fxOpen;
+  $p('fx-x').onclick = fxClose;
+  $p('fx-done').onclick = fxClose;
+  const bindSwitch = (id, key, label) => {
+    $p(id).onclick = () => {
+      AudioFX.ensure(); attachAudio();
+      AudioFX.set(key, !AudioFX.state[key]);
+      paintFx(); toast(label + (AudioFX.state[key] ? ' ON' : ' OFF')); wake();
+    };
+  };
+  bindSwitch('fx-reverb', 'reverb', '🏛️ Reverb');
+  bindSwitch('fx-vocal', 'vocal', '🎙️ Vocal clarity');
+  bindSwitch('fx-inst', 'inst', '🎸 Instrument');
+  bindSwitch('fx-night', 'night', '🌙 Night mode');
+  $p('fx-rev-amt').oninput = (e) => { AudioFX.set('reverbAmt', parseFloat(e.target.value)); paintFx(); wake(); };
+  $p('fx-rev-preset').onchange = (e) => { AudioFX.set('reverbPreset', e.target.value); toast('Reverb: ' + e.target.selectedOptions[0].text); wake(); };
+  $p('fx-vol').oninput = (e) => { setVol(parseFloat(e.target.value), { silent: true }); paintFx(); wake(); };
+  $p('fx-reset').onclick = () => { const v = AudioFX.state.vol; AudioFX.reset(); AudioFX.setVol(v); setVol(v, { silent: true }); paintFx(); toast('FX reset'); };
+  // live visualizer
+  let vizRAF = null;
+  const vizArr = new Uint8Array(32);
+  function startViz() {
+    stopViz();
+    const cv = $p('fxviz'); if (!cv) return;
+    const g = cv.getContext('2d');
+    const loop = () => {
+      vizRAF = requestAnimationFrame(loop);
+      if ($p('fxpanel').style.display !== 'block') return;
+      AudioFX.freqData(vizArr);
+      const W = cv.width, H = cv.height;
+      g.clearRect(0, 0, W, H);
+      const n = vizArr.length, bw = W / n;
+      for (let i = 0; i < n; i++) {
+        const v = (vizArr[i] || 0) / 255;
+        const h = 4 + v * (H - 8);
+        const x = i * bw + 1;
+        const grad = g.createLinearGradient(0, H, 0, H - h);
+        const hot = AudioFX.state.vol > 1.01;
+        grad.addColorStop(0, hot ? '#ffd166' : '#E50914');
+        grad.addColorStop(1, hot ? '#ff8c42' : '#ff5a5a');
+        g.fillStyle = vizArr[i] ? grad : '#2a2a2e';
+        const y = H - h;
+        if (g.roundRect) { g.beginPath(); g.roundRect(x, y, bw - 2, h, 3); g.fill(); }
+        else g.fillRect(x, y, bw - 2, h);
+      }
+    };
+    loop();
+  }
+  function stopViz() { if (vizRAF) cancelAnimationFrame(vizRAF); vizRAF = null; }
+  window.__fxCleanup = stopViz;
   $p('pp-full').onclick = () => { if (document.fullscreenElement) document.exitFullscreen().catch(() => {}); else $p('pp').requestFullscreen?.().catch(() => toast('Fullscreen blocked by browser')); };
   $p('pp-pip').onclick = async () => { try { if (document.pictureInPictureElement) await document.exitPictureInPicture(); else await vid.requestPictureInPicture(); } catch { toast('Picture-in-picture not supported here'); } };
   $p('phelpbtn').onclick = () => { const h = $p('phelpbox'); const open = h.style.display === 'block'; h.style.display = open ? 'none' : 'block'; menuOpen = !open; wake(); };
@@ -678,10 +1052,19 @@ async function playContent(contentId, episodeId = null) {
   $p('pp').addEventListener('mousemove', wake);
   $p('pp').addEventListener('touchstart', wake, { passive: true });
   vid.addEventListener('waiting', () => $p('pspin').style.display = 'block');
-  vid.addEventListener('playing', () => { $p('pspin').style.display = 'none'; syncPlayBtn(); wake(); });
+  vid.addEventListener('playing', () => { $p('pspin').style.display = 'none'; syncPlayBtn(); wake(); attachAudio(); });
   vid.addEventListener('pause', () => { syncPlayBtn(); wake(); });
-  vid.addEventListener('loadedmetadata', () => { applySpeed(); syncVol(); paintBar(); });
-  applySpeed(); syncVol();
+  vid.addEventListener('loadedmetadata', () => { applySpeed(); attachAudio(); paintBar(); });
+  applySpeed(); paintVolUI(AudioFX.state.vol);
+  // try early attach (needs user gesture — playing event retries)
+  try { attachAudio(); } catch {}
+  // reflect saved FX on the ✨ button dot without opening panel
+  try {
+    const n0 = AudioFX.activeCount;
+    const dot0 = document.querySelector('#pp-fx .dot');
+    if (dot0) dot0.style.display = n0 ? 'block' : 'none';
+    if (n0) $p('pp-fx')?.classList.add('active');
+  } catch {}
   // keyboard
   const onKey = (e) => {
     const tag = document.activeElement?.tagName;
@@ -697,8 +1080,8 @@ async function playContent(contentId, episodeId = null) {
     if (k === ' ' || k === 'k' || k === 'K') { toggle(); wake(); e.preventDefault(); }
     else if (k === 'ArrowLeft' || k === 'j' || k === 'J') { seekBy(-10); e.preventDefault(); }
     else if (k === 'ArrowRight' || k === 'l' || k === 'L') { seekBy(10); e.preventDefault(); }
-    else if (k === 'ArrowUp') { setVol(vid.volume + 0.1); wake(); e.preventDefault(); }
-    else if (k === 'ArrowDown') { setVol(vid.volume - 0.1); wake(); e.preventDefault(); }
+    else if (k === 'ArrowUp') { setVol(curVol() + 0.1); wake(); e.preventDefault(); }
+    else if (k === 'ArrowDown') { setVol(curVol() - 0.1); wake(); e.preventDefault(); }
     else if (k === 'f' || k === 'F') $p('pp-full').click();
     else if (k === 'm' || k === 'M') $p('pp-mute').click();
     else if ((k === 'n' || k === 'N') && nextEp) goEp(nextEp);
@@ -718,13 +1101,47 @@ async function playContent(contentId, episodeId = null) {
   vid.onpause = () => save(true);
   const sk = $('#pskip');
   if (sk) sk.onclick = () => { vid.currentTime = Math.min(vid.duration - 5, Math.max(vid.currentTime + 60, 90)); };
-  window.__playerToken = pushLayer('player');
-  window.__playerExit = (fromPop) => {
+  // history: modal->player replaces the modal entry (no orphan step),
+  // episode->episode replaces the player entry (no stacking)
+  const _mt = window.__modalToken, _pt = window.__playerToken;
+  try {
+    if (_mt && history.state && history.state.n === _mt) {
+      window.__modalToken = null;
+      try { closeModal(); } catch {}
+      window.__playerToken = ++histSeq;
+      history.replaceState({ lanflix: 'player', n: window.__playerToken }, '');
+    } else if (_pt && history.state && history.state.n === _pt) {
+      window.__playerToken = ++histSeq;
+      history.replaceState({ lanflix: 'player', n: window.__playerToken }, '');
+    } else {
+      window.__playerToken = pushLayer('player');
+    }
+  } catch { try { window.__playerToken = pushLayer('player'); } catch {} }
+  window.__playerExit = (fromPop, opts = {}) => {
     const t = window.__playerToken; window.__playerToken = null;
     try { save(true); } catch {}
-    closePlayer();
-    if (S.view === 'home') { try { renderMain(); } catch {} }
-    if (!fromPop) consumeLayer(t);
+    const cid = c.id;
+    if (opts.toBrowse) {
+      closePlayer();
+      if (!fromPop) consumeLayer(t);
+      try { renderMain(); } catch {}
+      return;
+    }
+    // default: back lands on the title's detail page, not the home grid
+    if (!fromPop) {
+      // ← button: swap the player entry for a modal entry, then render without pushing
+      // (openDetail skips push when state.n already equals __modalToken)
+      closePlayer();
+      try {
+        window.__modalToken = ++histSeq;
+        history.replaceState({ lanflix: 'modal', n: window.__modalToken }, '');
+      } catch {}
+      openDetail(cid).catch(() => { try { renderMain(); } catch {} });
+    } else {
+      // system back: player entry already popped, push a fresh detail layer
+      closePlayer();
+      openDetail(cid).catch(() => { try { renderMain(); } catch {} });
+    }
   };
   $('#pback').onclick = () => window.__playerExit(false);
   vid.onended = async () => {
@@ -756,7 +1173,7 @@ async function playContent(contentId, episodeId = null) {
       <div style="display:flex;gap:10px;justify-content:center;flex-wrap:wrap"><button class="btn btn-light focusable" id="pend-re">↺ Replay</button><button class="btn btn-ghost focusable" id="pend-back">← Back to browse</button></div>`;
     box.style.display = 'flex'; wake(); clearTimeout(hideT);
     $p('pend-re').onclick = () => { box.style.display = 'none'; vid.currentTime = 0; vid.play().catch(() => {}); };
-    $p('pend-back').onclick = () => { window.__playerExit(false); if (S.view !== 'home') renderMain(); };
+    $p('pend-back').onclick = () => window.__playerExit(false, { toBrowse: true });
   };
   vid.onerror = async () => {
     if (!vid.src.includes('/api/stream/')) return;
@@ -777,7 +1194,7 @@ async function playContent(contentId, episodeId = null) {
       if (box) {
         box.style.display = 'flex';
         box.innerHTML = `<h2>File missing on server</h2><div style="color:#bbb;font-size:14px;margin-bottom:16px">“${esc(fname)}” is linked but not found under <code>media/</code>. If you moved the project folder, restart + <b>Admin → Rescan</b> re-links it automatically.</div>
-          <div style="display:flex;gap:10px;justify-content:center;flex-wrap:wrap">${dl}<button class="btn btn-ghost btn-sm focusable" id="perr-back">← Back to browse</button></div>`;
+          <div style="display:flex;gap:10px;justify-content:center;flex-wrap:wrap">${dl}<button class="btn btn-ghost btn-sm focusable" id="perr-back">← Back</button></div>`;
         const bb = $('#perr-back'); if (bb) bb.onclick = () => window.__playerExit(false);
         wake(); clearTimeout(hideT);
       }
@@ -789,7 +1206,7 @@ async function playContent(contentId, episodeId = null) {
       box.style.display = 'flex';
       box.innerHTML = `<h2>Cannot play ${esc(fmt)} here</h2><div style="color:#bbb;font-size:14px;margin-bottom:8px">“${esc(fname)}” is on the server, but browsers can't decode it. Best: convert to <b>.mp4 (H.264/AAC)</b>:</div>
         <div style="color:#888;font-size:12px;margin-bottom:16px"><code>ffmpeg -i "${esc(fname)}" -c:v libx264 -c:a aac -movflags +faststart out.mp4</code></div>
-        <div style="display:flex;gap:10px;justify-content:center;flex-wrap:wrap">${dl}<button class="btn btn-ghost btn-sm focusable" id="perr-back">← Back to browse</button></div>`;
+        <div style="display:flex;gap:10px;justify-content:center;flex-wrap:wrap">${dl}<button class="btn btn-ghost btn-sm focusable" id="perr-back">← Back</button></div>`;
       const bb = $('#perr-back'); if (bb) bb.onclick = () => window.__playerExit(false);
       wake(); clearTimeout(hideT);
     }
@@ -800,6 +1217,8 @@ function closePlayer() {
   clearTimeout(playerTimer);
   if (window.__pkey) { document.removeEventListener('keydown', window.__pkey); window.__pkey = null; }
   window.__playerLocked = false;
+  try { window.__fxCleanup && window.__fxCleanup(); } catch {}
+  try { AudioFX.detach(); } catch {}
   try { if (document.fullscreenElement) document.exitFullscreen().catch(() => {}); } catch {}
   try { if (document.pictureInPictureElement) document.exitPictureInPicture().catch(() => {}); } catch {}
   $('#player-root').innerHTML = '';
