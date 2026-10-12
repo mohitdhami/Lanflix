@@ -1,0 +1,12 @@
+Put your shows here — one folder per show, episodes named with season/episode:
+
+   media/series/Breaking Bad/S01E01 Pilot.mp4
+   media/series/Breaking Bad/S01E02 Cats in the Bag.mp4
+   media/series/Breaking Bad/poster.jpg        (optional)
+   media/series/Breaking Bad/Season 2/S02E01.mp4   (subfolders are fine too)
+
+Accepted episode names: S01E01, s1e2, 1x03 …
+
+Then open LanFlix → CRM → Rescan media.
+
+TIP: use .mp4 (H.264) — it plays directly in every browser/TV. .mkv usually does NOT play in browsers.

@@ -1,0 +1,23 @@
+node_modules/
+data/
+public/posters/c*-*
+*.db
+*.db-wal
+*.db-shm
+.DS_Store
+# local video library (never commit) — keep only the guide files
+media/movies/*
+media/series/*
+!media/movies/PUT_YOUR_MOVIES_HERE.txt
+!media/movies/metadata.example.json
+!media/series/PUT_YOUR_SHOWS_HERE.txt
+# video/subtitle/poster binaries anywhere, just in case
+*.mp4
+*.mkv
+*.webm
+*.mov
+*.avi
+*.m4v
+*.vtt
+*.srt
+!media/movies/metadata.example.json

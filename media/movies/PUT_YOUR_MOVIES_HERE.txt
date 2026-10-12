@@ -1,0 +1,15 @@
+Put your movies here. Two ways:
+
+1) Folder per movie (recommended — supports poster + subtitles + metadata):
+   media/movies/Dune Part Two (2024)/Dune Part Two (2024).mp4
+   media/movies/Dune Part Two (2024)/poster.jpg
+   media/movies/Dune Part Two (2024)/backdrop.jpg
+   media/movies/Dune Part Two (2024)/Dune Part Two (2024).vtt   (subtitles, optional)
+   media/movies/Dune Part Two (2024)/metadata.json              (optional, see example below)
+
+2) Loose file:
+   media/movies/Avatar (2009).mp4
+
+Then open LanFlix → CRM → Rescan media.
+
+TIP: use .mp4 (H.264) — it plays directly in every browser/TV. .mkv usually does NOT play in browsers.
