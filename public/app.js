@@ -936,10 +936,14 @@ async function renderEpManager(contentId) {
         <input type="file" id="eb-fo-${contentId}" webkitdirectory hidden /></div>
       <div id="eb-pend-${contentId}"></div>
       <div id="eb-result-${contentId}"></div>
-      ${episodes.map(e => `<div style="display:flex;gap:8px;align-items:center;font-size:12.5px;padding:5px 0;border-bottom:1px solid #2a2a2a">
+      <div id="ep-list-${contentId}">
+      ${episodes.map(e => `<div class="ep-drag" draggable="true" data-epid="${e.id}" style="display:flex;gap:8px;align-items:center;font-size:12.5px;padding:5px 0;border-bottom:1px solid #2a2a2a;cursor:grab">
+        <span style="color:#666;cursor:grab;padding:0 2px" title="Drag to reorder">⠿</span>
         <span style="color:#888">S${e.season} E${e.episode}</span><span style="flex:1">${esc(e.title)}</span>
         <span style="color:#888">${e.video_path ? '💾' : e.remote_url ? '🌐' : '❌'}</span>
         <button class="btn btn-ghost btn-sm" data-epdel="${e.id}">✕</button></div>`).join('') || '<div style="font-size:12px;color:#888">No episodes yet.</div>'}
+      </div>
+      ${episodes.length > 1 ? '<div style="font-size:11.5px;color:#777;margin-top:2px">Drag rows by ⠿ to rearrange — order saves on drop.</div>' : ''}
       <div style="display:flex;gap:6px;margin-top:8px;flex-wrap:wrap">
         <input class="tbl-input" id="ne-s-${contentId}" placeholder="S#" style="max-width:56px" />
         <input class="tbl-input" id="ne-e-${contentId}" placeholder="E# (auto)" style="max-width:70px" />
@@ -952,6 +956,7 @@ async function renderEpManager(contentId) {
       await api('/api/admin/episodes/' + b.dataset.epdel, { method: 'DELETE' });
       renderEpManager(contentId);
     });
+    wireEpDrag(contentId, episodes);
     $('#ne-go-' + contentId).onclick = async () => {
       const title = $('#ne-t-' + contentId).value.trim();
       if (!title) return toast('Episode title required');
@@ -965,6 +970,86 @@ async function renderEpManager(contentId) {
     };
     wireEpBulkDrop(contentId);
   } catch (e) { box.innerHTML = `<span style="color:#f99;font-size:12px">Failed to load episodes</span>`; }
+}
+// Pure helper: new S/E assignment after dragging one row to a new visual
+// position. rows = [{id, season}] in current display order. The dragged row
+// takes the season of the row at the insertion point (so cross-season drops
+// move it), then every season present is numbered 1..N in the new order.
+function computeEpOrder(rows, draggedId, targetId, before) {
+  const list = rows.filter(r => r.id !== draggedId);
+  const dragged = rows.find(r => r.id === draggedId);
+  if (!dragged) return null;
+  let idx;
+  if (targetId == null) idx = list.length;
+  else {
+    idx = list.findIndex(r => r.id === targetId);
+    if (idx < 0) idx = list.length;
+    else if (!before) idx++;
+  }
+  const ref = (targetId == null ? null : list.find(r => r.id === targetId))
+    || list[list.length - 1] || dragged;
+  list.splice(idx, 0, { id: dragged.id, season: ref.season });
+  const counters = {};
+  return list.map(r => {
+    counters[r.season] = (counters[r.season] || 0) + 1;
+    return { id: r.id, season: r.season, episode: counters[r.season] };
+  });
+}
+// Drag-and-rearrange for the episode list: HTML5 DnD with a red insertion
+// indicator; the full new order saves atomically on drop.
+function wireEpDrag(contentId, episodes) {
+  const list = $('#ep-list-' + contentId);
+  if (!list || episodes.length < 2) return;
+  const rows = () => $$('.ep-drag', list);
+  const clearMarks = () => rows().forEach(r => r.classList.remove('dragging', 'drop-before', 'drop-after'));
+  const saveOrder = async (order) => {
+    try {
+      await api('/api/admin/episodes/reorder', { method: 'POST', body: JSON.stringify({ content_id: contentId, episodes: order }) });
+      toast('Order saved');
+    } catch (e) { toast(e.message); }
+    renderEpManager(contentId);
+  };
+  rows().forEach(row => {
+    row.addEventListener('dragstart', (e) => {
+      e.dataTransfer.setData('text/plain', row.dataset.epid);
+      e.dataTransfer.effectAllowed = 'move';
+      row.classList.add('dragging');
+    });
+    row.addEventListener('dragend', clearMarks);
+    row.addEventListener('dragover', (e) => {
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'move';
+      const dragging = list.querySelector('.ep-drag.dragging');
+      if (!dragging || dragging === row) return;
+      const rect = row.getBoundingClientRect();
+      const before = (e.clientY - rect.top) < rect.height / 2;
+      rows().forEach(r => r.classList.remove('drop-before', 'drop-after'));
+      row.classList.add(before ? 'drop-before' : 'drop-after');
+    });
+    row.addEventListener('dragleave', () => row.classList.remove('drop-before', 'drop-after'));
+    row.addEventListener('drop', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const draggedId = Number(e.dataTransfer.getData('text/plain'));
+      const targetId = Number(row.dataset.epid);
+      const before = row.classList.contains('drop-before');
+      clearMarks();
+      if (!draggedId || draggedId === targetId) return;
+      const order = computeEpOrder(episodes.map(x => ({ id: x.id, season: x.season })), draggedId, targetId, before);
+      if (order) saveOrder(order);
+    });
+  });
+  // Dropping below the last row appends at the end.
+  list.addEventListener('dragover', (e) => e.preventDefault());
+  list.addEventListener('drop', (e) => {
+    if (e.target.closest && e.target.closest('.ep-drag')) return; // handled by row
+    e.preventDefault();
+    const draggedId = Number(e.dataTransfer.getData('text/plain'));
+    clearMarks();
+    if (!draggedId) return;
+    const order = computeEpOrder(episodes.map(x => ({ id: x.id, season: x.season })), draggedId, null, false);
+    if (order) saveOrder(order);
+  });
 }
 // Bulk episode staging: drop/pick MANY files at once, review + edit S/E/title
 // per file in one table, then upload everything with a single click.

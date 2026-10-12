@@ -379,6 +379,207 @@ func deleteAdminEpisode(w http.ResponseWriter, r *http.Request, uid int64, role 
 	J(w, 200, map[string]any{"ok": true})
 }
 
+func putAdminEpisode(w http.ResponseWriter, r *http.Request, uid int64, role string) {
+	eid := pathID(r)
+	ep, err := db.QueryOne(`SELECT * FROM episodes WHERE id=?`, eid)
+	if err != nil {
+		E(w, 404, "Not found")
+		return
+	}
+	b := decode(r, nil)
+	cid := intVal(ep["content_id"])
+	s := intVal(ep["season"])
+	if v, p := b["season"]; p {
+		s = num(v, 1)
+		if s <= 0 {
+			s = 1
+		}
+	}
+	e := intVal(ep["episode"])
+	if v, p := b["episode"]; p {
+		e = num(v, 0)
+		if e <= 0 {
+			E(w, 400, "Episode must be a positive number")
+			return
+		}
+	}
+	title := str(ep["title"])
+	if v, p := b["title"]; p {
+		title = strings.TrimSpace(str(v))
+		if title == "" {
+			E(w, 400, "Title required")
+			return
+		}
+	}
+	desc := str(ep["description"])
+	if v, p := b["description"]; p {
+		desc = str(v)
+	}
+	if db.Count(`SELECT COUNT(*) FROM episodes WHERE content_id=? AND season=? AND episode=? AND id != ?`, cid, s, e, eid) > 0 {
+		E(w, 400, "S"+itoa64(int(s))+" E"+itoa64(int(e))+" already exists (use move to swap)")
+		return
+	}
+	db.Conn.Exec(`UPDATE episodes SET season=?, episode=?, title=?, description=? WHERE id=?`, s, e, title, desc, eid)
+	np, _ := db.QueryOne(`SELECT * FROM episodes WHERE id=?`, eid)
+	J(w, 200, map[string]any{"ok": true, "episode": np})
+}
+
+// postAdminEpisodeMove swaps an episode's position with its neighbour in
+// (season, episode) order. Reordering = exchanging S/E numbers, so playback
+// order follows everywhere (detail page, player next/prev, API) and survives
+// rescans (the scanner keys rows by file, not by number).
+func postAdminEpisodeMove(w http.ResponseWriter, r *http.Request, uid int64, role string) {
+	eid := pathID(r)
+	ep, err := db.QueryOne(`SELECT * FROM episodes WHERE id=?`, eid)
+	if err != nil {
+		E(w, 404, "Not found")
+		return
+	}
+	b := decode(r, nil)
+	dir := strings.ToLower(strings.TrimSpace(str(b["direction"])))
+	if dir != "up" && dir != "down" {
+		E(w, 400, `direction must be "up" or "down"`)
+		return
+	}
+	cid := intVal(ep["content_id"])
+	rows, _ := db.QueryMap(`SELECT id, season, episode FROM episodes WHERE content_id=? ORDER BY season, episode, id`, cid)
+	idx := -1
+	for i, rr := range rows {
+		if intVal(rr["id"]) == eid {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		E(w, 404, "Not found")
+		return
+	}
+	other := -1
+	if dir == "up" && idx > 0 {
+		other = idx - 1
+	} else if dir == "down" && idx < len(rows)-1 {
+		other = idx + 1
+	}
+	if other < 0 {
+		J(w, 200, map[string]any{"ok": true, "moved": false})
+		return
+	}
+	a, o := rows[idx], rows[other]
+	tx, err := db.Conn.Begin()
+	if err != nil {
+		E(w, 500, "Could not reorder")
+		return
+	}
+	defer tx.Rollback()
+	// Swap via a temporary slot so no transient duplicate exists.
+	if _, err := tx.Exec(`UPDATE episodes SET season=?, episode=? WHERE id=?`, int64(-1), int64(-1), intVal(a["id"])); err != nil {
+		E(w, 500, "Could not reorder")
+		return
+	}
+	if _, err := tx.Exec(`UPDATE episodes SET season=?, episode=? WHERE id=?`, intVal(a["season"]), intVal(a["episode"]), intVal(o["id"])); err != nil {
+		E(w, 500, "Could not reorder")
+		return
+	}
+	if _, err := tx.Exec(`UPDATE episodes SET season=?, episode=? WHERE id=?`, intVal(o["season"]), intVal(o["episode"]), intVal(a["id"])); err != nil {
+		E(w, 500, "Could not reorder")
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		E(w, 500, "Could not reorder")
+		return
+	}
+	J(w, 200, map[string]any{"ok": true, "moved": true})
+}
+
+// postAdminEpisodesReorder applies a full drag-and-drop ordering in one
+// atomic request. Body: {content_id, episodes: [{id, season, episode}]}.
+// Every row of the series must be present exactly once with positive,
+// collision-free numbers; only season/episode are rewritten (titles, files
+// and links untouched), so rescans keep the new order.
+func postAdminEpisodesReorder(w http.ResponseWriter, r *http.Request, uid int64, role string) {
+	b := decode(r, nil)
+	cid := num(b["content_id"], 0)
+	if cid == 0 {
+		E(w, 400, "content_id required")
+		return
+	}
+	if db.Count(`SELECT COUNT(*) FROM content WHERE id=? AND type='series'`, cid) == 0 {
+		E(w, 404, "Series not found")
+		return
+	}
+	raw, ok := b["episodes"].([]any)
+	if !ok || len(raw) == 0 {
+		E(w, 400, "episodes array required")
+		return
+	}
+	type slot struct {
+		id     int64
+		season int64
+		ep     int64
+	}
+	var slots []slot
+	seenID := map[int64]bool{}
+	seenSE := map[string]bool{}
+	for _, x := range raw {
+		m, ok := x.(map[string]any)
+		if !ok {
+			E(w, 400, "bad episodes entry")
+			return
+		}
+		id, s, e := num(m["id"], 0), num(m["season"], 0), num(m["episode"], 0)
+		if id == 0 || s <= 0 || e <= 0 {
+			E(w, 400, "each entry needs id + positive season/episode")
+			return
+		}
+		if seenID[id] {
+			E(w, 400, "duplicate episode id in order")
+			return
+		}
+		seenID[id] = true
+		key := itoa64(int(s)) + ":" + itoa64(int(e))
+		if seenSE[key] {
+			E(w, 400, "S"+itoa64(int(s))+" E"+itoa64(int(e))+" assigned twice")
+			return
+		}
+		seenSE[key] = true
+		slots = append(slots, slot{id: id, season: s, ep: e})
+	}
+	if db.Count(`SELECT COUNT(*) FROM episodes WHERE content_id=?`, cid) != len(slots) {
+		E(w, 400, "order must include every episode exactly once")
+		return
+	}
+	for _, sl := range slots {
+		if db.Count(`SELECT COUNT(*) FROM episodes WHERE id=? AND content_id=?`, sl.id, cid) == 0 {
+			E(w, 404, "Episode not found for this series")
+			return
+		}
+	}
+	tx, err := db.Conn.Begin()
+	if err != nil {
+		E(w, 500, "Could not reorder")
+		return
+	}
+	defer tx.Rollback()
+	// Park everything first so intermediate states never collide.
+	for _, sl := range slots {
+		if _, err := tx.Exec(`UPDATE episodes SET season=?, episode=? WHERE id=?`, int64(-1)-sl.id, int64(-1)-sl.id, sl.id); err != nil {
+			E(w, 500, "Could not reorder")
+			return
+		}
+	}
+	for _, sl := range slots {
+		if _, err := tx.Exec(`UPDATE episodes SET season=?, episode=? WHERE id=?`, sl.season, sl.ep, sl.id); err != nil {
+			E(w, 500, "Could not reorder")
+			return
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		E(w, 500, "Could not reorder")
+		return
+	}
+	J(w, 200, map[string]any{"ok": true, "moved": len(slots)})
+}
+
 func postAdminScan(w http.ResponseWriter, r *http.Request, uid int64, role string) {
 	res := scanner.ScanMedia()
 	J(w, 200, map[string]any{"ok": true, "added": res.Added, "updated": res.Updated, "healed": res.Healed})

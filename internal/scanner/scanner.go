@@ -303,11 +303,21 @@ func ScanMedia() Result {
 						}
 					}
 				}
+				// Never wipe art the folder doesn't have: IMDb downloads,
+				// poster uploads and manual picks live outside media/ and
+				// would otherwise vanish on every restart/rescan.
+				keepPoster, keepBackdrop := storedPoster, storedBackdrop
+				if keepPoster == "" {
+					keepPoster = strVal(existing["poster_path"])
+				}
+				if keepBackdrop == "" {
+					keepBackdrop = strVal(existing["backdrop_path"])
+				}
 				var y any
 				if year != nil {
 					y = int64(*year)
 				}
-				db.Conn.Exec(`UPDATE content SET title=?, year=?, poster_path=?, backdrop_path=?, video_path=? WHERE id=?`, title, y, storedPoster, storedBackdrop, keep, id)
+				db.Conn.Exec(`UPDATE content SET title=?, year=?, poster_path=?, backdrop_path=?, video_path=? WHERE id=?`, title, y, keepPoster, keepBackdrop, keep, id)
 				res.Updated++
 			} else {
 				var y any
@@ -393,7 +403,16 @@ func ScanMedia() Result {
 				showRow, _ = db.QueryOne(`SELECT * FROM content WHERE type='series' AND title=?`, sh.Name())
 				res.Added++
 			} else {
-				db.Conn.Exec(`UPDATE content SET poster_path=?, backdrop_path=? WHERE id=?`, storedPoster, storedBackdrop, showRow["id"])
+				// Same rule as movies: keep existing art when the folder
+				// has none, so IMDb/poster-upload art survives restarts.
+				keepPoster, keepBackdrop := storedPoster, storedBackdrop
+				if keepPoster == "" {
+					keepPoster = strVal(showRow["poster_path"])
+				}
+				if keepBackdrop == "" {
+					keepBackdrop = strVal(showRow["backdrop_path"])
+				}
+				db.Conn.Exec(`UPDATE content SET poster_path=?, backdrop_path=? WHERE id=?`, keepPoster, keepBackdrop, showRow["id"])
 			}
 			sort.Strings(files)
 			epNum := 1

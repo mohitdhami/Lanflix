@@ -45,6 +45,9 @@ var (
 	DeleteAdminContent = deleteAdminContent
 	PostAdminConvert = postAdminConvert
 	PostAdminEpisode = postAdminEpisode
+	PutAdminEpisode = putAdminEpisode
+	PostAdminEpisodeMove = postAdminEpisodeMove
+	PostAdminEpisodesReorder = postAdminEpisodesReorder
 	DeleteAdminEpisode = deleteAdminEpisode
 	PostAdminScan    = postAdminScan
 	PostAdminSeedDemo = postAdminSeedDemo

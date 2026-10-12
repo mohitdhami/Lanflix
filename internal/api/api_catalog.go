@@ -207,7 +207,7 @@ func getContentDetail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	out := rowContent(c)
-	eps, _ := db.QueryMap(`SELECT * FROM episodes WHERE content_id=? ORDER BY season,episode`, intVal(c["id"]))
+	eps, _ := db.QueryMap(`SELECT * FROM episodes WHERE content_id=? ORDER BY season,episode,id`, intVal(c["id"]))
 	if eps == nil {
 		eps = []map[string]any{}
 	}
@@ -246,7 +246,7 @@ func getContentDetail(w http.ResponseWriter, r *http.Request) {
 }
 
 func getEpisodes(w http.ResponseWriter, r *http.Request) {
-	eps, _ := db.QueryMap(`SELECT * FROM episodes WHERE content_id=? ORDER BY season,episode`, pathID(r))
+	eps, _ := db.QueryMap(`SELECT * FROM episodes WHERE content_id=? ORDER BY season,episode,id`, pathID(r))
 	if eps == nil {
 		eps = []map[string]any{}
 	}
