@@ -2,10 +2,13 @@ package api
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"lanflix/internal/db"
@@ -84,15 +87,27 @@ func postAdminPoster(w http.ResponseWriter, r *http.Request, uid int64, role str
 		}
 		dest := filepath.Join(dir, "c"+itoa64(int(cid))+"-"+field+ext)
 		if err := saveUploaded(f, dest); err == nil {
+			stored := db.StoredPath(dest)
 			if field == "poster" {
-				db.Conn.Exec(`UPDATE content SET poster_path=? WHERE id=?`, dest, cid)
+				db.Conn.Exec(`UPDATE content SET poster_path=? WHERE id=?`, stored, cid)
 			} else {
-				db.Conn.Exec(`UPDATE content SET backdrop_path=? WHERE id=?`, dest, cid)
+				db.Conn.Exec(`UPDATE content SET backdrop_path=? WHERE id=?`, stored, cid)
 			}
 		}
 		f.Close()
 	}
 	J(w, 200, map[string]any{"ok": true})
+}
+
+// epMetaIn carries optional per-file episode metadata for bulk series
+// uploads. The frontend's bulk staging UI sends one entry per dropped file
+// (matched by its drop-relative path); Season/Episode nil or <=0 means
+// "auto" (parse from filename, else next free number).
+type epMetaIn struct {
+	Path    string `json:"path"`
+	Season  *int64 `json:"season"`
+	Episode *int64 `json:"episode"`
+	Title   string `json:"title"`
 }
 
 func postAdminUpload(w http.ResponseWriter, r *http.Request, uid int64, role string) {
@@ -103,6 +118,17 @@ func postAdminUpload(w http.ResponseWriter, r *http.Request, uid int64, role str
 	var paths []string
 	if raw := r.FormValue("paths"); raw != "" {
 		_ = json.Unmarshal([]byte(raw), &paths)
+	}
+	var epMetas []epMetaIn
+	if raw := r.FormValue("episodes"); raw != "" {
+		_ = json.Unmarshal([]byte(raw), &epMetas)
+	}
+	metaByRel := map[string]epMetaIn{}
+	for _, m := range epMetas {
+		if m.Path == "" {
+			continue
+		}
+		metaByRel[safeRel(m.Path)] = m
 	}
 	// Attach-to-title mode?
 	var contentRow map[string]any
@@ -129,6 +155,15 @@ func postAdminUpload(w http.ResponseWriter, r *http.Request, uid int64, role str
 	skipped := []string{}
 	var savedVideos []struct{ rel, abs string }
 	files := r.MultipartForm.File["files"]
+
+	// Validate + resolve every part first (no disk writes yet).
+	type upItem struct {
+		hdr  *multipart.FileHeader
+		rel  string
+		ext  string
+		dest string
+	}
+	var items []upItem
 	for i, hdr := range files {
 		rel := ""
 		if i < len(paths) {
@@ -151,53 +186,194 @@ func postAdminUpload(w http.ResponseWriter, r *http.Request, uid int64, role str
 			skipped = append(skipped, rel)
 			continue
 		}
-		src, err := hdr.Open()
+		items = append(items, upItem{hdr: hdr, rel: rel, ext: ext, dest: dest})
+	}
+
+	// saveItem writes one validated part to disk (counts + tracks videos).
+	saveItem := func(it upItem) bool {
+		src, err := it.hdr.Open()
 		if err != nil {
-			skipped = append(skipped, rel)
-			continue
+			skipped = append(skipped, it.rel)
+			return false
 		}
-		if err := saveUploaded(src, dest); err != nil {
-			skipped = append(skipped, rel)
-			src.Close()
-			continue
+		defer src.Close()
+		if err := saveUploaded(src, it.dest); err != nil {
+			skipped = append(skipped, it.rel)
+			return false
 		}
-		src.Close()
 		uploaded++
-		if videoExts[ext] {
-			savedVideos = append(savedVideos, struct{ rel, abs string }{rel, dest})
+		if videoExts[it.ext] {
+			savedVideos = append(savedVideos, struct{ rel, abs string }{it.rel, it.dest})
 		}
+		return true
 	}
 	episodesAdded := 0
 	var linkedVideo any
+	var details []map[string]any
 	if contentRow != nil && str(contentRow["type"]) == "series" {
 		cid := intVal(contentRow["id"])
-		for _, v := range savedVideos {
-			if db.Count(`SELECT COUNT(*) FROM episodes WHERE content_id=? AND video_path=?`, cid, v.abs) > 0 {
+		// S/E slots already taken. A slot whose file is gone counts as
+		// free (its orphaned row gets repointed rather than skipped).
+		used := map[string]bool{}
+		slotRow := map[string]map[string]any{}
+		if rows, _ := db.QueryMap(`SELECT id, season, episode, video_path FROM episodes WHERE content_id=?`, cid); rows != nil {
+			for _, rr := range rows {
+				key := fmt.Sprintf("%d:%d", intVal(rr["season"]), intVal(rr["episode"]))
+				vp, _ := rr["video_path"].(string)
+				if vp == "" || db.ExistsLocal(vp) {
+					used[key] = true
+				}
+				slotRow[key] = rr
+			}
+		}
+		nextAuto := map[int64]int64{}
+		if rows, _ := db.QueryMap(`SELECT season, COALESCE(MAX(episode),0) AS m FROM episodes WHERE content_id=? GROUP BY season`, cid); rows != nil {
+			for _, rr := range rows {
+				nextAuto[intVal(rr["season"])] = intVal(rr["m"]) + 1
+			}
+		}
+		// Plan every video BEFORE touching disk: explicit S/E first
+		// (sorted), then autos — so a mixed bulk drop ("S02E01.mp4" +
+		// "Finale.mp4" with E blank) never lets an auto pick collide with
+		// an explicit slot, and colliding files never land in the show
+		// folder (the next scan would otherwise adopt them into wrong
+		// slots).
+		type pendingEp struct {
+			it            upItem
+			stored, title string
+			s, e          int64
+			isAuto        bool
+		}
+		var pend []pendingEp
+		seenDest := map[string]bool{}
+		for _, it := range items {
+			if !videoExts[it.ext] {
 				continue
 			}
-			parsed := scanner.ParseEpisodeFile(filepath.Base(v.rel))
+			if seenDest[it.dest] {
+				skipped = append(skipped, it.rel)
+				details = append(details, map[string]any{"file": it.rel, "status": "skipped", "reason": "duplicate file in this upload"})
+				continue
+			}
+			seenDest[it.dest] = true
+			stored := db.StoredPath(it.dest)
+			parsed := scanner.ParseEpisodeFile(filepath.Base(it.rel))
 			s := int64(parsed.Season)
 			var e int64
 			if parsed.Episode != nil {
 				e = int64(*parsed.Episode)
-			} else {
-				e = int64(db.Count(`SELECT COALESCE(MAX(episode),0) FROM episodes WHERE content_id=? AND season=?`, cid, s)) + 1
-			}
-			if db.Count(`SELECT COUNT(*) FROM episodes WHERE content_id=? AND season=? AND episode=?`, cid, s, e) > 0 {
-				continue
 			}
 			title := parsed.Title
-			if title == "" {
+			explicitEp := e > 0
+			if m, ok := metaByRel[it.rel]; ok {
+				if m.Season != nil && *m.Season > 0 {
+					s = *m.Season
+				}
+				if m.Episode != nil && *m.Episode > 0 {
+					e = *m.Episode
+					explicitEp = true
+				} else {
+					e = 0
+					explicitEp = false
+				}
+				if strings.TrimSpace(m.Title) != "" {
+					title = strings.TrimSpace(m.Title)
+				}
+			}
+			if s <= 0 {
+				s = 1
+			}
+			if title == "" && explicitEp {
 				title = "Episode " + itoa64(int(e))
 			}
-			db.Conn.Exec(`INSERT INTO episodes (content_id,season,episode,title,video_path) VALUES (?,?,?,?,?)`, cid, s, e, title, v.abs)
-			episodesAdded++
+			pend = append(pend, pendingEp{it: it, stored: stored, title: title, s: s, e: e, isAuto: !explicitEp})
 		}
-	} else if contentRow != nil && len(savedVideos) > 0 {
-		attach := r.FormValue("attach")
-		if attach == "replace" || (str(contentRow["video_path"]) == "" && str(contentRow["remote_url"]) == "") {
-			db.Conn.Exec(`UPDATE content SET video_path=?, remote_url=? WHERE id=?`, savedVideos[0].abs, "", intVal(contentRow["id"]))
-			linkedVideo = savedVideos[0].abs
+		sort.Slice(pend, func(i, j int) bool {
+			if pend[i].isAuto != pend[j].isAuto {
+				return !pend[i].isAuto // explicit first
+			}
+			if pend[i].s != pend[j].s {
+				return pend[i].s < pend[j].s
+			}
+			if pend[i].e != pend[j].e {
+				return pend[i].e < pend[j].e
+			}
+			return pend[i].it.rel < pend[j].it.rel
+		})
+		for _, p := range pend {
+			s, e, title := p.s, p.e, p.title
+			if p.isAuto {
+				// next free episode number in this season
+				cand := nextAuto[s]
+				if cand <= 0 {
+					cand = 1
+				}
+				for used[fmt.Sprintf("%d:%d", s, cand)] {
+					cand++
+				}
+				e = cand
+				if title == "" {
+					title = "Episode " + itoa64(int(e))
+				}
+			} else if db.Count(`SELECT COUNT(*) FROM episodes WHERE content_id=? AND video_path=?`, cid, p.stored) > 0 {
+				// Same file again: refresh it on disk, no new row.
+				if saveItem(p.it) {
+					details = append(details, map[string]any{"file": p.it.rel, "status": "skipped", "reason": "already linked — file refreshed", "season": s, "episode": e, "title": title})
+				} else {
+					details = append(details, map[string]any{"file": p.it.rel, "status": "error", "reason": "could not save file"})
+				}
+				continue
+			}
+			key := fmt.Sprintf("%d:%d", s, e)
+			if used[key] {
+				// Slot taken by a present file: keep the folder clean by
+				// NOT saving the colliding file.
+				skipped = append(skipped, p.it.rel)
+				details = append(details, map[string]any{
+					"file": p.it.rel, "status": "skipped",
+					"reason": fmt.Sprintf("S%d E%d already exists", s, e),
+					"season": s, "episode": e, "title": title,
+				})
+				continue
+			}
+			if !saveItem(p.it) {
+				details = append(details, map[string]any{"file": p.it.rel, "status": "error", "reason": "could not save file"})
+				continue
+			}
+			if prev, ok := slotRow[key]; ok {
+				// Orphaned slot (its file is gone): repoint, don't insert.
+				db.Conn.Exec(`UPDATE episodes SET video_path=?, title=? WHERE id=?`, p.stored, title, prev["id"])
+			} else {
+				db.Conn.Exec(`INSERT INTO episodes (content_id,season,episode,title,video_path) VALUES (?,?,?,?,?)`, cid, s, e, title, p.stored)
+			}
+			used[key] = true
+			if nextAuto[s] <= e {
+				nextAuto[s] = e + 1
+			}
+			episodesAdded++
+			details = append(details, map[string]any{
+				"file": p.it.rel, "status": "added",
+				"season": s, "episode": e, "title": title,
+			})
+		}
+		// Non-video sidecars (subs, posters, metadata) save as before.
+		for _, it := range items {
+			if videoExts[it.ext] {
+				continue
+			}
+			saveItem(it)
+		}
+	} else {
+		for _, it := range items {
+			saveItem(it)
+		}
+		if contentRow != nil && len(savedVideos) > 0 {
+			attach := r.FormValue("attach")
+			if attach == "replace" || (str(contentRow["video_path"]) == "" && str(contentRow["remote_url"]) == "") {
+				stored := db.StoredPath(savedVideos[0].abs)
+				db.Conn.Exec(`UPDATE content SET video_path=?, remote_url=? WHERE id=?`, stored, "", intVal(contentRow["id"]))
+				linkedVideo = stored
+			}
 		}
 	}
 	res := scanner.ScanMedia()
@@ -208,16 +384,20 @@ func postAdminUpload(w http.ResponseWriter, r *http.Request, uid int64, role str
 	if skipped == nil {
 		skipped = []string{}
 	}
+	if details == nil {
+		details = []map[string]any{}
+	}
 	J(w, 200, map[string]any{"ok": true, "uploaded": uploaded, "skipped": skipped,
 		"episodes_added": episodesAdded, "linked_video": linkedVideo, "files": filesOut,
-		"added": res.Added, "updated": res.Updated})
+		"details": details,
+		"added": res.Added, "updated": res.Updated, "healed": res.Healed})
 }
 
 func titleFolder(isSeries bool, c map[string]any) string {
 	if isSeries {
 		if ep, err := db.QueryOne(`SELECT video_path FROM episodes WHERE content_id=? AND video_path != '' LIMIT 1`, intVal(c["id"])); err == nil {
 			if vp := str(ep["video_path"]); vp != "" {
-				return filepath.Dir(vp)
+				return filepath.Dir(db.ResolvePath(vp))
 			}
 		}
 		name := safeRel(str(c["title"]))
@@ -227,6 +407,10 @@ func titleFolder(isSeries bool, c map[string]any) string {
 		return filepath.Join(scanner.SeriesDir(), name)
 	}
 	if vp := str(c["video_path"]); vp != "" {
+		abs := db.ResolvePath(vp)
+		if abs != "" {
+			return filepath.Dir(abs)
+		}
 		return filepath.Dir(vp)
 	}
 	name := safeRel(str(c["title"]))
@@ -252,10 +436,10 @@ func postAdminImdbFetch(w http.ResponseWriter, r *http.Request, uid int64, role 
 	}
 	posterPath, backdropPath := "", ""
 	if p, err := imdb.DownloadArt(db.PublicDir(), tt, "poster", info.PosterURL); err == nil {
-		posterPath = p
+		posterPath = db.StoredPath(p)
 	}
 	if b, err := imdb.DownloadArt(db.PublicDir(), tt, "backdrop", info.BackdropURL); err == nil {
-		backdropPath = b
+		backdropPath = db.StoredPath(b)
 	}
 	J(w, 200, map[string]any{
 		"imdb_id": info.ID, "type": info.Type, "title": info.Title, "year": info.Year,
@@ -290,6 +474,8 @@ func postAdminImdbImport(w http.ResponseWriter, r *http.Request, uid int64, role
 	}
 	posterPath, _ := imdb.DownloadArt(db.PublicDir(), tt, "poster", info.PosterURL)
 	backdropPath, _ := imdb.DownloadArt(db.PublicDir(), tt, "backdrop", info.BackdropURL)
+	posterPath = db.StoredPath(posterPath)
+	backdropPath = db.StoredPath(backdropPath)
 	var year any
 	if info.Year != nil {
 		year = int64(*info.Year)

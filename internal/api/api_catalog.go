@@ -31,10 +31,17 @@ func getFile(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, p, http.StatusFound)
 		return
 	}
-	abs, err := filepath.Abs(p)
-	if err != nil {
-		E(w, 400, "bad path")
-		return
+	// Stored paths may be Root-relative (current format) or absolute
+	// (legacy). Resolve against the current project Root — NOT the process
+	// cwd — so restarts from a different directory still serve files.
+	abs := db.ResolvePath(p)
+	if !filepath.IsAbs(abs) {
+		aa, err := filepath.Abs(abs)
+		if err != nil {
+			E(w, 400, "bad path")
+			return
+		}
+		abs = aa
 	}
 	allowed := []string{db.MediaRoot(), db.PublicDir(), os.TempDir()}
 	ok := false
@@ -414,12 +421,15 @@ func subsEpisode(w http.ResponseWriter, r *http.Request)  { subsByID(w, r, false
 
 func streamByID(w http.ResponseWriter, r *http.Request, isMovie bool) {
 	var vp, remote string
+	var healTable string
+	var healID int64
 	if isMovie {
 		c, good := getContent(w, pathID(r))
 		if !good {
 			return
 		}
 		vp, remote = str(c["video_path"]), str(c["remote_url"])
+		healTable, healID = "content", intVal(c["id"])
 	} else {
 		e, err := db.QueryOne(`SELECT * FROM episodes WHERE id=?`, pathID(r))
 		if err != nil {
@@ -427,16 +437,18 @@ func streamByID(w http.ResponseWriter, r *http.Request, isMovie bool) {
 			return
 		}
 		vp, remote = str(e["video_path"]), str(e["remote_url"])
+		healTable, healID = "episodes", intVal(e["id"])
 	}
 	if vp != "" {
-		if st, err := os.Stat(vp); err == nil && !st.IsDir() {
-			f, err := os.Open(vp)
-			if err != nil {
-				E(w, 404, "File not found")
-				return
+		abs := db.ResolvePath(vp)
+		if st, err := os.Stat(abs); err == nil && !st.IsDir() {
+			// Heal the stored value if resolving relocated it (project
+			// moved/renamed since the row was written) so the next restart
+			// doesn't need the fallback search again.
+			if norm := db.StoredPath(abs); norm != vp {
+				db.Conn.Exec(`UPDATE `+healTable+` SET video_path=? WHERE id=?`, norm, healID)
 			}
-			defer f.Close()
-			http.ServeContent(w, r, filepath.Base(vp), st.ModTime(), f)
+			serveVideo(w, r, abs, st)
 			return
 		}
 	}
@@ -445,6 +457,39 @@ func streamByID(w http.ResponseWriter, r *http.Request, isMovie bool) {
 		return
 	}
 	E(w, 404, "No video file. Add files to media/ and re-scan.")
+}
+
+// serveVideo streams with an explicit Content-Type so browsers get the best
+// chance (notably .mkv -> video/x-matroska), with Range support via ServeContent.
+func serveVideo(w http.ResponseWriter, r *http.Request, abs string, st os.FileInfo) {
+	f, err := os.Open(abs)
+	if err != nil {
+		E(w, 404, "File not found")
+		return
+	}
+	defer f.Close()
+	if ct := videoContentType(abs); ct != "" {
+		w.Header().Set("Content-Type", ct)
+	}
+	http.ServeContent(w, r, filepath.Base(abs), st.ModTime(), f)
+}
+
+func videoContentType(p string) string {
+	switch strings.ToLower(filepath.Ext(p)) {
+	case ".mp4":
+		return "video/mp4"
+	case ".webm":
+		return "video/webm"
+	case ".m4v":
+		return "video/x-m4v"
+	case ".mov":
+		return "video/quicktime"
+	case ".mkv":
+		return "video/x-matroska"
+	case ".avi":
+		return "video/x-msvideo"
+	}
+	return ""
 }
 
 func subsByID(w http.ResponseWriter, r *http.Request, isMovie bool) {
@@ -465,8 +510,9 @@ func subsByID(w http.ResponseWriter, r *http.Request, isMovie bool) {
 	}
 	out := []map[string]any{}
 	if vp != "" {
-		dir := filepath.Dir(vp)
-		base := strings.TrimSuffix(filepath.Base(vp), filepath.Ext(vp))
+		abs := db.ResolvePath(vp)
+		dir := filepath.Dir(abs)
+		base := strings.TrimSuffix(filepath.Base(abs), filepath.Ext(abs))
 		ents, _ := os.ReadDir(dir)
 		for _, e := range ents {
 			n := e.Name()

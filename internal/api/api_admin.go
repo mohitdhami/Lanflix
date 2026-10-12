@@ -212,7 +212,7 @@ func postAdminContent(w http.ResponseWriter, r *http.Request, uid int64, role st
 		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		ctype, title, str(b["description"]), year, arrField(b["genres"], "[]"), arrField(b["cast"], "[]"),
 		str(b["director"]), strOr(str(b["maturity_rating"]), "U/A 13+"), num(b["duration_sec"], 0),
-		str(b["poster_path"]), str(b["backdrop_path"]), str(b["trailer_url"]), str(b["video_path"]), str(b["remote_url"]),
+		db.NormalizeStored(str(b["poster_path"])), db.NormalizeStored(str(b["backdrop_path"])), str(b["trailer_url"]), db.NormalizeStored(str(b["video_path"])), str(b["remote_url"]),
 		feat, str(b["imdb_id"]))
 	if err != nil {
 		E(w, 400, "Could not create title")
@@ -263,7 +263,13 @@ func putAdminContent(w http.ResponseWriter, r *http.Request, uid int64, role str
 	}
 	keep := func(k string) string {
 		if v, p := b[k]; p {
-			return str(v)
+			s := str(v)
+			// Local file references are stored Root-relative so they survive
+			// restarts / folder moves; URLs pass through untouched.
+			if k == "poster_path" || k == "backdrop_path" || k == "video_path" {
+				return db.NormalizeStored(s)
+			}
+			return s
 		}
 		return str(c[k])
 	}
@@ -355,7 +361,7 @@ func postAdminEpisode(w http.ResponseWriter, r *http.Request, uid int64, role st
 		return
 	}
 	res, err := db.Conn.Exec(`INSERT INTO episodes (content_id,season,episode,title,description,duration_sec,remote_url,video_path) VALUES (?,?,?,?,?,?,?,?)`,
-		cid, s, e, title, str(b["description"]), num(b["duration_sec"], 0), str(b["remote_url"]), str(b["video_path"]))
+		cid, s, e, title, str(b["description"]), num(b["duration_sec"], 0), str(b["remote_url"]), db.NormalizeStored(str(b["video_path"])))
 	if err != nil {
 		E(w, 400, "Could not add episode")
 		return
@@ -375,7 +381,7 @@ func deleteAdminEpisode(w http.ResponseWriter, r *http.Request, uid int64, role 
 
 func postAdminScan(w http.ResponseWriter, r *http.Request, uid int64, role string) {
 	res := scanner.ScanMedia()
-	J(w, 200, map[string]any{"ok": true, "added": res.Added, "updated": res.Updated})
+	J(w, 200, map[string]any{"ok": true, "added": res.Added, "updated": res.Updated, "healed": res.Healed})
 }
 
 func postAdminSeedDemo(w http.ResponseWriter, r *http.Request, uid int64, role string) {

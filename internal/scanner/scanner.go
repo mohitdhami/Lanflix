@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -21,6 +22,11 @@ func SeriesDir() string { return filepath.Join(db.MediaRoot(), "series") }
 var movieRe = regexp.MustCompile(`^(.*?)\s*\((\d{4})\)\s*$`)
 var epRe1 = regexp.MustCompile(`[Ss](\d{1,2})\s*[Ee](\d{1,3})`)
 var epRe2 = regexp.MustCompile(`(\d{1,2})x(\d{1,3})`)
+
+// Standalone episode markers without a season, e.g.
+// "The.Pacific.E03.720p.mkv", "Show - E04 - Title.mp4", "Episode 5.mp4".
+var epRe3 = regexp.MustCompile(`(?:^|[\.\s_\-])[Ee](\d{1,3})(?:[\.\s_\-]|$)`)
+var epRe4 = regexp.MustCompile(`(?i)episode\s*(\d{1,3})`)
 
 func ParseMovieFolder(name string) (string, *int) {
 	if m := movieRe.FindStringSubmatch(name); m != nil {
@@ -39,23 +45,35 @@ type epParsed struct {
 func ParseEpisodeFile(fname string) epParsed {
 	base := strings.TrimSuffix(fname, filepath.Ext(fname))
 	var s, e *int
+	token := ""
 	if m := epRe1.FindStringSubmatch(base); m != nil {
 		si, _ := strconv.Atoi(m[1])
 		ei, _ := strconv.Atoi(m[2])
 		s, e = &si, &ei
+		token = epRe1.FindString(base)
 	} else if m := epRe2.FindStringSubmatch(base); m != nil {
 		si, _ := strconv.Atoi(m[1])
 		ei, _ := strconv.Atoi(m[2])
 		s, e = &si, &ei
+		token = epRe2.FindString(base)
+	} else if m := epRe3.FindStringSubmatch(base); m != nil {
+		ei, _ := strconv.Atoi(m[1])
+		e = &ei
+		token = epRe3.FindString(base)
+	} else if m := epRe4.FindStringSubmatch(base); m != nil {
+		ei, _ := strconv.Atoi(m[1])
+		e = &ei
+		token = epRe4.FindString(base)
 	}
 	t := base
-	if s != nil && e != nil {
-		// strip the matched token for a cleaner title
-		token := epRe1.FindString(base)
-		if token == "" {
-			token = epRe2.FindString(base)
+	if e != nil {
+		if token != "" {
+			t = strings.Replace(base, token, " ", 1)
 		}
-		t = strings.Trim(strings.Replace(base, token, "", 1), "-_. ")
+		// Normalise separators so "The.Pacific.E03.720p" -> "The Pacific 720p"
+		t = strings.ReplaceAll(t, ".", " ")
+		t = strings.ReplaceAll(t, "_", " ")
+		t = strings.Join(strings.Fields(strings.Trim(t, "-_. ")), " ")
 		if t == "" {
 			t = base
 		}
@@ -98,14 +116,14 @@ func pickPoster(files []string, want string) string {
 }
 
 type fileMeta struct {
-	Title         string   `json:"title"`
-	Description   string   `json:"description"`
-	Year          *int     `json:"year"`
-	Genres        []string `json:"genres"`
-	Cast          []string `json:"cast"`
-	Director      string   `json:"director"`
-	Maturity      string   `json:"maturity_rating"`
-	DurationSec   int      `json:"duration_sec"`
+	Title       string   `json:"title"`
+	Description string   `json:"description"`
+	Year        *int     `json:"year"`
+	Genres      []string `json:"genres"`
+	Cast        []string `json:"cast"`
+	Director    string   `json:"director"`
+	Maturity    string   `json:"maturity_rating"`
+	DurationSec int      `json:"duration_sec"`
 }
 
 func mustJSON(v any) string {
@@ -119,6 +137,67 @@ func mustJSON(v any) string {
 type Result struct {
 	Added   int `json:"added"`
 	Updated int `json:"updated"`
+	Healed  int `json:"healed"`
+}
+
+// ReconcilePaths heals stale ABSOLUTE paths left over from a previous
+// checkout / restart (e.g. DB points at /old/dir/media/... while the files
+// now live under the current Root/media/...). It also normalises legacy
+// absolute values that are still valid into Root-relative form so the next
+// move/restart is a no-op. Returns number of rows healed.
+func ReconcilePaths() int {
+	healed := 0
+	healOne := func(table, col string, id any, stored string) {
+		if stored == "" {
+			return
+		}
+		lower := strings.ToLower(stored)
+		if strings.HasPrefix(lower, "http://") || strings.HasPrefix(lower, "https://") {
+			return
+		}
+		resolved := db.ResolvePath(stored)
+		if st, err := os.Stat(resolved); err != nil || st.IsDir() {
+			return // truly missing — leave row so admin can see it
+		}
+		normalised := db.StoredPath(resolved)
+		if normalised != stored {
+			db.Conn.Exec(`UPDATE `+table+` SET `+col+`=? WHERE id=?`, normalised, id)
+			healed++
+		}
+	}
+	contents, _ := db.QueryMap(`SELECT id, video_path, poster_path, backdrop_path FROM content`)
+	for _, c := range contents {
+		id := c["id"]
+		if s, _ := c["video_path"].(string); s != "" {
+			healOne("content", "video_path", id, s)
+		}
+		if s, _ := c["poster_path"].(string); s != "" {
+			healOne("content", "poster_path", id, s)
+		}
+		if s, _ := c["backdrop_path"].(string); s != "" {
+			healOne("content", "backdrop_path", id, s)
+		}
+	}
+	eps, _ := db.QueryMap(`SELECT id, video_path, thumbnail_path FROM episodes`)
+	for _, e := range eps {
+		id := e["id"]
+		if s, _ := e["video_path"].(string); s != "" {
+			healOne("episodes", "video_path", id, s)
+		}
+		if s, _ := e["thumbnail_path"].(string); s != "" {
+			if s != "" {
+				healOne("episodes", "thumbnail_path", id, s)
+			}
+		}
+	}
+	return healed
+}
+
+func strVal(v any) string {
+	if s, ok := v.(string); ok {
+		return s
+	}
+	return ""
 }
 
 func ScanMedia() Result {
@@ -126,6 +205,18 @@ func ScanMedia() Result {
 	moviesDir, seriesDir := MoviesDir(), SeriesDir()
 	os.MkdirAll(moviesDir, 0o755)
 	os.MkdirAll(seriesDir, 0o755)
+
+	// Heal moved-project references FIRST so the duplicate checks below
+	// (which compare stored paths) see the current locations instead of
+	// inserting duplicate rows for the same files.
+	res.Healed = ReconcilePaths()
+
+	resolveDir := func(stored string) string {
+		if stored == "" {
+			return ""
+		}
+		return filepath.Dir(db.ResolvePath(stored))
+	}
 
 	// ---- movies ----
 	if ents, err := os.ReadDir(moviesDir); err == nil {
@@ -140,6 +231,7 @@ func ScanMedia() Result {
 				continue
 			}
 			videoPath := videos[0]
+			storedVideo := db.StoredPath(videoPath)
 			imgs := filesInDir(folder, imgExts)
 			poster, backdrop := "", ""
 			for _, f := range imgs {
@@ -156,6 +248,13 @@ func ScanMedia() Result {
 			}
 			if backdrop == "" && len(imgs) > 1 {
 				backdrop = imgs[1]
+			}
+			storedPoster, storedBackdrop := "", ""
+			if poster != "" {
+				storedPoster = db.StoredPath(poster)
+			}
+			if backdrop != "" {
+				storedBackdrop = db.StoredPath(backdrop)
 			}
 			meta := fileMeta{}
 			if b, err := os.ReadFile(filepath.Join(folder, "metadata.json")); err == nil {
@@ -176,13 +275,17 @@ func ScanMedia() Result {
 				maturity = "U/A 13+"
 			}
 			var existing map[string]any
-			if r, err := db.QueryOne(`SELECT * FROM content WHERE video_path = ?`, videoPath); err == nil {
+			if r, err := db.QueryOne(`SELECT * FROM content WHERE video_path = ?`, storedVideo); err == nil {
+				existing = r
+			} else if r, err := db.QueryOne(`SELECT * FROM content WHERE video_path = ?`, videoPath); err == nil {
+				// legacy absolute row not yet normalised
 				existing = r
 			} else {
-				// same folder = same movie
+				// same folder = same movie (compare resolved dirs so
+				// moves/renames of the project root still match)
 				rows, _ := db.QueryMap(`SELECT * FROM content WHERE type='movie'`)
 				for _, r := range rows {
-					if vp, _ := r["video_path"].(string); vp != "" && filepath.Dir(vp) == folder {
+					if vp := strVal(r["video_path"]); vp != "" && resolveDir(vp) == folder {
 						existing = r
 						break
 					}
@@ -190,17 +293,21 @@ func ScanMedia() Result {
 			}
 			if existing != nil {
 				id := existing["id"]
-				keep := videoPath
-				if vp, _ := existing["video_path"].(string); vp != "" {
-					if _, err := os.Stat(vp); err == nil {
+				keep := storedVideo
+				if vp := strVal(existing["video_path"]); vp != "" {
+					if db.ExistsLocal(vp) {
 						keep = vp
+						// normalise legacy absolute -> relative while we're here
+						if norm := db.StoredPath(db.ResolvePath(vp)); norm != vp {
+							keep = norm
+						}
 					}
 				}
 				var y any
 				if year != nil {
 					y = int64(*year)
 				}
-				db.Conn.Exec(`UPDATE content SET title=?, year=?, poster_path=?, backdrop_path=?, video_path=? WHERE id=?`, title, y, poster, backdrop, keep, id)
+				db.Conn.Exec(`UPDATE content SET title=?, year=?, poster_path=?, backdrop_path=?, video_path=? WHERE id=?`, title, y, storedPoster, storedBackdrop, keep, id)
 				res.Updated++
 			} else {
 				var y any
@@ -209,22 +316,30 @@ func ScanMedia() Result {
 				}
 				db.Conn.Exec(`INSERT INTO content (type,title,description,year,genres,cast,director,maturity_rating,duration_sec,poster_path,backdrop_path,video_path)
 					VALUES ('movie',?,?,?,?,?,?,?,?,?,?,?)`,
-					title, meta.Description, y, mustJSON(genres), mustJSON(meta.Cast), meta.Director, maturity, int64(meta.DurationSec), poster, backdrop, videoPath)
+					title, meta.Description, y, mustJSON(genres), mustJSON(meta.Cast), meta.Director, maturity, int64(meta.DurationSec), storedPoster, storedBackdrop, storedVideo)
 				res.Added++
 			}
 		}
 		// loose files directly in movies/
 		for _, f := range filesInDir(moviesDir, videoExts) {
+			stored := db.StoredPath(f)
 			base := strings.TrimSuffix(filepath.Base(f), filepath.Ext(f))
 			title, year := ParseMovieFolder(base)
-			if _, err := db.QueryOne(`SELECT * FROM content WHERE video_path = ?`, f); err != nil {
-				var y any
-				if year != nil {
-					y = int64(*year)
-				}
-				db.Conn.Exec(`INSERT INTO content (type,title,year,genres,video_path) VALUES ('movie',?,?,?,?)`, title, y, `["Drama"]`, f)
-				res.Added++
+			if _, err := db.QueryOne(`SELECT * FROM content WHERE video_path = ?`, stored); err == nil {
+				continue
 			}
+			if _, err := db.QueryOne(`SELECT * FROM content WHERE video_path = ?`, f); err == nil {
+				// legacy absolute exists — normalise it
+				db.Conn.Exec(`UPDATE content SET video_path=? WHERE video_path=?`, stored, f)
+				res.Updated++
+				continue
+			}
+			var y any
+			if year != nil {
+				y = int64(*year)
+			}
+			db.Conn.Exec(`INSERT INTO content (type,title,year,genres,video_path) VALUES ('movie',?,?,?,?)`, title, y, `["Drama"]`, stored)
+			res.Added++
 		}
 	}
 
@@ -265,24 +380,25 @@ func ScanMedia() Result {
 			if backdrop == "" && len(imgs) > 1 {
 				backdrop = imgs[1]
 			}
+			storedPoster, storedBackdrop := "", ""
+			if poster != "" {
+				storedPoster = db.StoredPath(poster)
+			}
+			if backdrop != "" {
+				storedBackdrop = db.StoredPath(backdrop)
+			}
 			showRow, err := db.QueryOne(`SELECT * FROM content WHERE type='series' AND title=?`, sh.Name())
 			if err != nil {
-				_, _ = db.Conn.Exec(`INSERT INTO content (type,title,description,year,genres,poster_path,backdrop_path) VALUES ('series',?,?,NULL,?,?,?)`, sh.Name(), "", `["Drama"]`, poster, backdrop)
+				_, _ = db.Conn.Exec(`INSERT INTO content (type,title,description,year,genres,poster_path,backdrop_path) VALUES ('series',?,?,NULL,?,?,?)`, sh.Name(), "", `["Drama"]`, storedPoster, storedBackdrop)
 				showRow, _ = db.QueryOne(`SELECT * FROM content WHERE type='series' AND title=?`, sh.Name())
 				res.Added++
 			} else {
-				db.Conn.Exec(`UPDATE content SET poster_path=?, backdrop_path=? WHERE id=?`, poster, backdrop, showRow["id"])
+				db.Conn.Exec(`UPDATE content SET poster_path=?, backdrop_path=? WHERE id=?`, storedPoster, storedBackdrop, showRow["id"])
 			}
-			// sort for stable numbering
-			for i := 0; i < len(files); i++ {
-				for j := i + 1; j < len(files); j++ {
-					if files[j] < files[i] {
-						files[i], files[j] = files[j], files[i]
-					}
-				}
-			}
+			sort.Strings(files)
 			epNum := 1
 			for _, fp := range files {
+				stored := db.StoredPath(fp)
 				parsed := ParseEpisodeFile(filepath.Base(fp))
 				epNo := epNum
 				if parsed.Episode != nil {
@@ -291,21 +407,63 @@ func ScanMedia() Result {
 					epNum++
 				}
 				sid := showRow["id"]
-				if _, err := db.QueryOne(`SELECT * FROM episodes WHERE content_id=? AND season=? AND episode=?`, sid, int64(parsed.Season), int64(epNo)); err != nil {
-					if _, err := db.QueryOne(`SELECT * FROM episodes WHERE video_path=?`, fp); err != nil {
-						title := parsed.Title
-						if title == "" {
-							title = "Episode " + strconv.Itoa(epNo)
-						}
-						db.Conn.Exec(`INSERT INTO episodes (content_id,season,episode,title,video_path) VALUES (?,?,?,?,?)`, sid, int64(parsed.Season), int64(epNo), title, fp)
-						res.Added++
+				title := parsed.Title
+				if title == "" {
+					title = "Episode " + strconv.Itoa(epNo)
+				}
+				// 1) Same file already linked (by stored or legacy absolute
+				// path)? The row is authoritative for S/E/title (it may
+				// carry user-set bulk-upload values) — only normalise a
+				// legacy absolute path, never clobber metadata from the
+				// filename.
+				var byPath map[string]any
+				if r, err := db.QueryOne(`SELECT * FROM episodes WHERE content_id=? AND video_path=?`, sid, stored); err == nil {
+					byPath = r
+				} else if r, err := db.QueryOne(`SELECT * FROM episodes WHERE content_id=? AND video_path=?`, sid, fp); err == nil {
+					byPath = r
+				} else if r, err := db.QueryOne(`SELECT * FROM episodes WHERE video_path=?`, stored); err == nil {
+					// File moved across shows: adopt it if its S/E slot is free.
+					if int64Val(r["content_id"]) == int64Val(sid) {
+						byPath = r
+					} else if db.Count(`SELECT COUNT(*) FROM episodes WHERE content_id=? AND season=? AND episode=?`, sid, int64(parsed.Season), int64(epNo)) == 0 {
+						db.Conn.Exec(`UPDATE episodes SET content_id=?, season=?, episode=?, video_path=? WHERE id=?`, sid, int64(parsed.Season), int64(epNo), stored, r["id"])
+						res.Updated++
+						continue
 					}
-				} else {
-					// keep row, refresh path if renamed
-					db.Conn.Exec(`UPDATE episodes SET video_path=? WHERE content_id=? AND season=? AND episode=? AND video_path != ?`, fp, sid, int64(parsed.Season), int64(epNo), fp)
+				}
+				if byPath != nil {
+					if strVal(byPath["video_path"]) != stored {
+						db.Conn.Exec(`UPDATE episodes SET video_path=? WHERE id=?`, stored, byPath["id"])
+						res.Updated++
+					}
+					continue
+				}
+				// 2) Same S/E slot exists but points at a different file?
+				// Repoint only if the slot's current file is gone (rename /
+				// replacement). If the current file is still present, leave
+				// both alone — silently stealing the slot would orphan the
+				// existing episode and flip-flop on every scan.
+				if cur, err := db.QueryOne(`SELECT * FROM episodes WHERE content_id=? AND season=? AND episode=?`, sid, int64(parsed.Season), int64(epNo)); err != nil {
+					db.Conn.Exec(`INSERT INTO episodes (content_id,season,episode,title,video_path) VALUES (?,?,?,?,?)`, sid, int64(parsed.Season), int64(epNo), title, stored)
+					res.Added++
+				} else if curStored := strVal(cur["video_path"]); curStored != stored && !db.ExistsLocal(curStored) {
+					db.Conn.Exec(`UPDATE episodes SET video_path=? WHERE content_id=? AND season=? AND episode=?`, stored, sid, int64(parsed.Season), int64(epNo))
+					res.Updated++
 				}
 			}
 		}
 	}
 	return res
+}
+
+func int64Val(v any) int64 {
+	switch n := v.(type) {
+	case int64:
+		return n
+	case int:
+		return int64(n)
+	case float64:
+		return int64(n)
+	}
+	return 0
 }

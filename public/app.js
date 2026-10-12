@@ -758,8 +758,41 @@ async function playContent(contentId, episodeId = null) {
     $p('pend-re').onclick = () => { box.style.display = 'none'; vid.currentTime = 0; vid.play().catch(() => {}); };
     $p('pend-back').onclick = () => { window.__playerExit(false); if (S.view !== 'home') renderMain(); };
   };
-  vid.onerror = () => {
-    if (vid.src.includes('/api/stream/')) toast('⚠ Cannot play this file — missing on the server, or an unsupported format like .mkv (use .mp4).');
+  vid.onerror = async () => {
+    if (!vid.src.includes('/api/stream/')) return;
+    // Distinguish "file missing on server" (stream 404) from "browser can't
+    // decode this container/codec" (stream OK, video element failed).
+    let status = 0;
+    try {
+      const probe = await fetch(vid.src, { headers: { Range: 'bytes=0-0' } });
+      status = probe.status;
+      try { await probe.blob(); } catch {}
+    } catch {}
+    const fname = String((ep && ep.video_path) || c.video_path || '').split(/[\\/]/).pop() || 'video';
+    const ext = fname.includes('.') ? '.' + fname.split('.').pop().toLowerCase() : '';
+    const box = $p('pend');
+    const dl = `<a class="btn btn-light btn-sm focusable" href="${esc(vid.src)}" download="${esc(fname)}" style="text-decoration:none">⬇ Download file</a>`;
+    if (status === 404) {
+      toast('⚠ File missing on server — moved/renamed? Admin → Rescan media.');
+      if (box) {
+        box.style.display = 'flex';
+        box.innerHTML = `<h2>File missing on server</h2><div style="color:#bbb;font-size:14px;margin-bottom:16px">“${esc(fname)}” is linked but not found under <code>media/</code>. If you moved the project folder, restart + <b>Admin → Rescan</b> re-links it automatically.</div>
+          <div style="display:flex;gap:10px;justify-content:center;flex-wrap:wrap">${dl}<button class="btn btn-ghost btn-sm focusable" id="perr-back">← Back to browse</button></div>`;
+        const bb = $('#perr-back'); if (bb) bb.onclick = () => window.__playerExit(false);
+        wake(); clearTimeout(hideT);
+      }
+      return;
+    }
+    const fmt = ext || 'this format';
+    toast(`⚠ Cannot play ${fmt} in this browser — use .mp4 (H.264). File is on the server.`);
+    if (box) {
+      box.style.display = 'flex';
+      box.innerHTML = `<h2>Cannot play ${esc(fmt)} here</h2><div style="color:#bbb;font-size:14px;margin-bottom:8px">“${esc(fname)}” is on the server, but browsers can't decode it. Best: convert to <b>.mp4 (H.264/AAC)</b>:</div>
+        <div style="color:#888;font-size:12px;margin-bottom:16px"><code>ffmpeg -i "${esc(fname)}" -c:v libx264 -c:a aac -movflags +faststart out.mp4</code></div>
+        <div style="display:flex;gap:10px;justify-content:center;flex-wrap:wrap">${dl}<button class="btn btn-ghost btn-sm focusable" id="perr-back">← Back to browse</button></div>`;
+      const bb = $('#perr-back'); if (bb) bb.onclick = () => window.__playerExit(false);
+      wake(); clearTimeout(hideT);
+    }
   };
   vid.focus();
 }
@@ -804,11 +837,12 @@ async function collectDropFiles(dt) {
   }
   return files;
 }
-function uploadTitleFiles(contentId, files, attach, onStatus, onDone) {
+function uploadTitleFiles(contentId, files, attach, onStatus, onDone, epMeta) {
   const fd = new FormData();
   fd.append('content_id', contentId);
   fd.append('attach', attach || 'auto');
   fd.append('paths', JSON.stringify(files.map(f => dropRel(f))));
+  if (epMeta) fd.append('episodes', JSON.stringify(epMeta));
   files.forEach(f => fd.append('files', f, 'file'));
   const xhr = new XMLHttpRequest();
   xhr.open('POST', '/api/admin/upload');
@@ -827,6 +861,26 @@ function uploadTitleFiles(contentId, files, attach, onStatus, onDone) {
 // Compact drop zone used inside per-title edit panels: drop files/folders,
 // or pick via Files… / Folder… buttons. Staged files upload on demand.
 const VID_RE = /\.(mp4|webm|mkv|mov|avi|m4v)$/i;
+// Client-side mirror of the server's episode filename parsing (S01E01,
+// 1x02, standalone E03, "Episode 5"). Used to pre-fill the bulk-add table
+// so a multi-file drop needs no per-file typing when names are sane.
+function parseEpName(fname) {
+  const leaf = String(fname).split(/[\\/]/).pop();
+  const base = leaf.replace(/\.[^.]+$/, '');
+  let s = null, e = null, token = '';
+  let m;
+  if ((m = base.match(/[Ss](\d{1,2})\s*[Ee](\d{1,3})/))) { s = +m[1]; e = +m[2]; token = m[0]; }
+  else if ((m = base.match(/(\d{1,2})x(\d{1,3})/))) { s = +m[1]; e = +m[2]; token = m[0]; }
+  else if ((m = base.match(/(?:^|[\.\s_\-])[Ee](\d{1,3})(?:[\.\s_\-]|$)/))) { s = 1; e = +m[1]; token = m[0]; }
+  else if ((m = base.match(/episode\s*(\d{1,3})/i))) { s = 1; e = +m[1]; token = m[0]; }
+  let title;
+  if (e != null) {
+    title = base.split(token).join(' ').replace(/[\._]+/g, ' ').replace(/\s+/g, ' ').replace(/^[-_. ]+|[-_. ]+$/g, '') || base;
+  } else {
+    title = base.replace(/[\._]+/g, ' ').replace(/\s+/g, ' ').trim() || base;
+  }
+  return { season: s || 1, episode: e, title };
+}
 function titleDropRow(uid) {
   return `<div class="mini-drop" id="td-drop-${uid}">Drop video <b>files or a folder</b> here, or
     <button class="btn btn-ghost btn-sm" id="td-fi-b-${uid}">Files…</button>
@@ -875,7 +929,13 @@ async function renderEpManager(contentId) {
   try {
     const { episodes } = await api('/api/content/' + contentId + '/episodes');
     box.innerHTML = `<b style="font-size:13px">Episodes (${episodes.length})</b>
-      ${titleDropRow('e' + contentId)}
+      <div class="mini-drop" id="eb-drop-${contentId}">Drop <b>episode files</b> here — one drop can add a whole season — or
+        <button class="btn btn-ghost btn-sm" id="eb-fi-b-${contentId}">Files…</button>
+        <button class="btn btn-ghost btn-sm" id="eb-fo-b-${contentId}">Folder…</button>
+        <input type="file" id="eb-fi-${contentId}" multiple accept="video/*,.mkv,.avi,.mov,.webm,.m4v" hidden />
+        <input type="file" id="eb-fo-${contentId}" webkitdirectory hidden /></div>
+      <div id="eb-pend-${contentId}"></div>
+      <div id="eb-result-${contentId}"></div>
       ${episodes.map(e => `<div style="display:flex;gap:8px;align-items:center;font-size:12.5px;padding:5px 0;border-bottom:1px solid #2a2a2a">
         <span style="color:#888">S${e.season} E${e.episode}</span><span style="flex:1">${esc(e.title)}</span>
         <span style="color:#888">${e.video_path ? '💾' : e.remote_url ? '🌐' : '❌'}</span>
@@ -885,7 +945,8 @@ async function renderEpManager(contentId) {
         <input class="tbl-input" id="ne-e-${contentId}" placeholder="E# (auto)" style="max-width:70px" />
         <input class="tbl-input" id="ne-t-${contentId}" placeholder="Episode title *" style="flex:1;min-width:140px" />
         <input class="tbl-input" id="ne-u-${contentId}" placeholder="Direct video URL (.mp4)" style="flex:1;min-width:140px" />
-        <button class="btn btn-light btn-sm" id="ne-go-${contentId}">Add</button></div>`;
+        <button class="btn btn-light btn-sm" id="ne-go-${contentId}">Add</button></div>
+      <div style="font-size:11.5px;color:#777;margin-top:4px">Single remote-URL episode? Use the row above. Local files? Use the drop zone — S/E/title are pre-filled from filenames and editable before upload.</div>`;
     $$('[data-epdel]', box).forEach(b => b.onclick = async () => {
       if (!confirm('Delete this episode?')) return;
       await api('/api/admin/episodes/' + b.dataset.epdel, { method: 'DELETE' });
@@ -902,14 +963,85 @@ async function renderEpManager(contentId) {
         toast('Episode added'); renderEpManager(contentId);
       } catch (e) { toast(e.message); }
     };
-    wireTitleDrop('e' + contentId, (files, setStatus, done) => {
-      uploadTitleFiles(contentId, files, 'auto', setStatus, (r) => {
-        setStatus(''); done();
-        toast(`Uploaded ${r.uploaded} file(s), +${r.episodes_added} episode(s)`);
-        renderEpManager(contentId);
-      });
-    });
+    wireEpBulkDrop(contentId);
   } catch (e) { box.innerHTML = `<span style="color:#f99;font-size:12px">Failed to load episodes</span>`; }
+}
+// Bulk episode staging: drop/pick MANY files at once, review + edit S/E/title
+// per file in one table, then upload everything with a single click.
+function wireEpBulkDrop(contentId) {
+  const dz = $('#eb-drop-' + contentId), pendBox = $('#eb-pend-' + contentId);
+  if (!dz || !pendBox) return;
+  const staged = [];
+  const paint = () => {
+    if (!staged.length) { pendBox.innerHTML = ''; return; }
+    pendBox.innerHTML = `<div style="font-size:12px;color:#bbb;margin:6px 0">${staged.length} file(s) staged — check S/E/title, then upload once:</div>
+      <div style="max-height:220px;overflow:auto;border:1px solid #2a2a2a;border-radius:6px">
+      <table style="width:100%;font-size:12px"><tr style="color:#888;text-align:left"><th>File</th><th style="width:52px">S</th><th style="width:64px">E</th><th>Title</th><th style="width:30px"></th></tr>
+      ${staged.map((s, i) => `<tr>
+        <td style="color:#bbb;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(s.rel)}">${esc(s.rel)}</td>
+        <td><input class="tbl-input" data-br="${i}" data-bf="season" value="${s.season}" style="max-width:52px" /></td>
+        <td><input class="tbl-input" data-br="${i}" data-bf="episode" value="${s.episode ?? ''}" placeholder="auto" style="max-width:64px" /></td>
+        <td><input class="tbl-input" data-br="${i}" data-bf="title" value="${esc(s.title)}" style="min-width:120px" /></td>
+        <td><button class="btn btn-ghost btn-sm" data-brm="${i}">✕</button></td></tr>`).join('')}</table></div>
+      <div style="display:flex;gap:8px;margin-top:6px;align-items:center;flex-wrap:wrap">
+        <label style="font-size:12px;color:#bbb">Season for all: <input class="tbl-input" id="eb-sall-${contentId}" placeholder="—" style="max-width:52px" /></label>
+        <button class="btn btn-ghost btn-sm" id="eb-apply-s-${contentId}">Apply</button>
+        <button class="btn btn-light btn-sm" id="eb-up-${contentId}">Upload ${staged.length} episode(s)</button>
+        <button class="btn btn-ghost btn-sm" id="eb-cl-${contentId}">Clear</button>
+        <span id="eb-st-${contentId}" style="font-size:12px;color:#bbb"></span></div>`;
+    $$('input[data-br]', pendBox).forEach(inp => inp.oninput = () => {
+      const row = staged[+inp.dataset.br];
+      if (inp.dataset.bf === 'title') row.title = inp.value;
+      else row[inp.dataset.bf] = inp.value;
+    });
+    $$('[data-brm]', pendBox).forEach(b => b.onclick = () => { staged.splice(+b.dataset.brm, 1); paint(); });
+    $('#eb-cl-' + contentId).onclick = () => { staged.length = 0; paint(); };
+    $('#eb-apply-s-' + contentId).onclick = () => {
+      const v = $('#eb-sall-' + contentId).value.trim();
+      if (!/^\d+$/.test(v)) return toast('Season must be a number');
+      staged.forEach(s => s.season = v);
+      paint();
+    };
+    $('#eb-up-' + contentId).onclick = () => {
+      const setStatus = (m) => { const el = $('#eb-st-' + contentId); if (el) el.textContent = m; };
+      const toInt = (v) => (/^\d+$/.test(String(v).trim()) ? parseInt(v, 10) : 0);
+      const meta = staged.map(s => ({ path: s.rel, season: toInt(s.season), episode: toInt(s.episode), title: String(s.title || '').trim() }));
+      uploadTitleFiles(contentId, staged.map(s => s.file), 'auto', setStatus, (r) => {
+        const skipped = (r.details || []).filter(d => d.status !== 'added');
+        toast(`Uploaded ${r.uploaded} file(s), +${r.episodes_added} episode(s)` + (skipped.length ? `, ${skipped.length} skipped` : ''));
+        staged.length = 0;
+        renderEpManager(contentId).then(() => {
+          const res = $('#eb-result-' + contentId);
+          if (res && skipped.length) {
+            res.innerHTML = `<div style="font-size:12px;color:#e8a33d;margin:6px 0">Skipped ${skipped.length}: ${skipped.map(d => `${esc(String(d.file).split('/').pop())} (${esc(d.reason || 'exists')})`).join('; ')}</div>`;
+          }
+        });
+      }, meta);
+    };
+  };
+  const add = (files) => {
+    let n = 0;
+    for (const f of files) {
+      const rel = dropRel(f);
+      if (!rel || !VID_RE.test(rel)) continue;
+      if (staged.some(p => p.rel === rel && p.file.size === f.size && p.file.lastModified === f.lastModified)) continue;
+      const parsed = parseEpName(rel);
+      staged.push({ file: f, rel, season: parsed.season, episode: parsed.episode ?? '', title: parsed.title });
+      n++;
+    }
+    // stable order so auto-numbering matches what the server assigns
+    staged.sort((a, b) => a.rel < b.rel ? -1 : a.rel > b.rel ? 1 : 0);
+    paint();
+    if (!n && !staged.length) toast('No video files in that selection');
+    else if (n) toast(`${n} file(s) staged — review S/E/title, then Upload`);
+  };
+  $('#eb-fi-b-' + contentId).onclick = () => $('#eb-fi-' + contentId).click();
+  $('#eb-fo-b-' + contentId).onclick = () => $('#eb-fo-' + contentId).click();
+  $('#eb-fi-' + contentId).onchange = (e) => { add([...e.target.files]); e.target.value = ''; };
+  $('#eb-fo-' + contentId).onchange = (e) => { add([...e.target.files]); e.target.value = ''; };
+  ['dragenter', 'dragover'].forEach(ev => dz.addEventListener(ev, (e) => { e.preventDefault(); e.stopPropagation(); dz.classList.add('over'); }));
+  ['dragleave', 'drop'].forEach(ev => dz.addEventListener(ev, (e) => { e.preventDefault(); e.stopPropagation(); dz.classList.remove('over'); }));
+  dz.addEventListener('drop', async (e) => add(await collectDropFiles(e.dataTransfer)));
 }
 async function viewAdmin() {
   if (S.user?.role !== 'admin') { $('#view').innerHTML = `<div class="page"><div class="empty">Admins only.</div></div>`; return; }
