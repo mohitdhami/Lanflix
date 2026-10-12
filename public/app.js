@@ -354,6 +354,13 @@ async function openDetail(id) {
   const pid = S.profile.id;
   const { item: c } = await api(`/api/content/${id}?profileId=${pid}`);
   const eps = c.episodes || [];
+  // resume target: most recently watched unfinished episode, else first unfinished
+  const resumeEp = eps.filter(e => e.watch && !e.watch.completed && e.watch.position_sec > 5)
+    .sort((a, b) => String(b.watch.updated_at).localeCompare(String(a.watch.updated_at)))[0]
+    || eps.find(e => !(e.watch && e.watch.completed)) || eps[0];
+  const canResume = c.type === 'movie'
+    ? !!(c.progress && c.progress.position_sec > 10 && !c.progress.completed)
+    : !!(resumeEp && resumeEp.watch && resumeEp.watch.position_sec > 10 && !resumeEp.watch.completed);
   const seasons = [...new Set(eps.map(e => e.season))];
   const more = (await api(`/api/content?genre=${encodeURIComponent((c.genres || [])[0] || '')}&limit=8&profileId=${pid}`)).items.filter(x => x.id !== c.id);
   $('#modal-root').innerHTML = `
@@ -362,7 +369,7 @@ async function openDetail(id) {
     <div class="modal-hero" style="background-image:url('${esc(c.backdrop || c.poster)}')">
       <div class="modal-title"><h2>${esc(c.title)}</h2>
         <div class="modal-actions">
-          <button class="btn btn-play focusable" id="mplay">▶ ${c.resume_at ? 'Resume' : 'Play'}</button>
+          <button class="btn btn-play focusable" id="mplay">▶ ${canResume ? 'Resume' : 'Play'}</button>
           ${c.trailer_url ? `<button class="btn btn-info btn-sm focusable" id="mtrailer">🎞 Trailer</button>` : ''}
           <button class="circle-btn focusable" id="mlist" title="My List">${c.in_list ? '✓' : '＋'}</button>
           <button class="circle-btn focusable ${c.my_rating === 1 ? 'on' : ''}" id="mlike" title="I like this">👍</button>
@@ -379,7 +386,7 @@ async function openDetail(id) {
   if (!(history.state && history.state.n === window.__modalToken)) window.__modalToken = pushLayer('modal');
   $('#mclose').onclick = () => modalExit(false);
   $('#mback').onclick = (e) => { if (e.target.id === 'mback') modalExit(false); };
-  $('#mplay').onclick = () => { closeModal(); window.__modalToken = null; playContent(c.id); };
+  $('#mplay').onclick = () => { closeModal(); window.__modalToken = null; playContent(c.id, c.type === 'series' && resumeEp ? resumeEp.id : undefined); };
   const mt = $('#mtrailer');
   if (mt) mt.onclick = () => {
     const t = document.createElement('div');
@@ -412,10 +419,14 @@ async function openDetail(id) {
   };
 }
 function hEp(e) {
+  const w = e.watch;
+  const showRes = w && !w.completed && w.position_sec > 5 && w.duration_sec > 0;
+  const pct = showRes ? Math.min(100, Math.round((w.position_sec / w.duration_sec) * 100)) : 0;
   return `<div class="ep focusable" tabindex="0" data-ep="${e.id}"><div class="n">${e.episode}</div>
     <img src="${esc(e.thumbnail_path || '')}" onerror="this.style.visibility='hidden'" alt="" />
-    <div><div class="et">S${e.season} E${e.episode} — ${esc(e.title)}</div><div class="ed">${esc(e.description || '')} • ${fmtDur(e.duration_sec)}</div></div>
-    <div class="play-mini">▶</div></div>`;
+    <div style="flex:1"><div class="et">S${e.season} E${e.episode} — ${esc(e.title)}</div><div class="ed">${esc(e.description || '')} • ${fmtDur(e.duration_sec)}</div>
+    ${showRes ? `<div style="height:3px;background:#444;border-radius:2px;margin-top:6px"><div style="height:100%;width:${pct}%;background:var(--red);border-radius:2px"></div></div><div style="font-size:11px;color:var(--green);margin-top:3px">Resume from ${fmtTime(w.position_sec)}</div>` : ''}</div>
+    <div class="play-mini">${showRes ? '⏵' : '▶'}</div></div>`;
 }
 function closeModal() { $('#modal-root').innerHTML = ''; }
 // Layered history: player + detail push entries so the phone/system back
@@ -452,7 +463,9 @@ async function playContent(contentId, episodeId = null) {
   const src = c.type === 'movie' ? (c.video_path ? `/api/stream/movie/${c.id}` : c.remote_url) : (ep.video_path ? `/api/stream/episode/${ep.id}` : ep.remote_url);
   if (!src) return toast('No video file linked. Add files to media/ and rescan.');
   await api(`/api/content/${c.id}/view`, { method: 'POST', body: JSON.stringify({ profileId: pid, episodeId: ep?.id || null }) }).catch(() => {});
-  const resumeFrom = !ep ? (c.progress?.position_sec || 0) : 0;
+  const resumeFrom = !ep
+    ? (c.progress && !c.progress.completed ? (c.progress.position_sec || 0) : 0)
+    : (ep.watch && !ep.watch.completed ? (ep.watch.position_sec || 0) : 0);
 
   $('#player-root').innerHTML = `
   <div class="player" id="pp">

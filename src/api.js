@@ -248,7 +248,12 @@ function registerApi(app) {
     if (profileId) {
       out.in_list = !!db.prepare('SELECT 1 FROM my_list WHERE profile_id=? AND content_id=?').get(profileId, c.id);
       out.my_rating = db.prepare('SELECT value FROM ratings WHERE profile_id=? AND content_id=?').get(profileId, c.id)?.value || 0;
-      out.progress = db.prepare('SELECT * FROM watch_history WHERE profile_id=? AND content_id=? AND episode_id IS NULL').get(profileId, c.id) || null;
+      const wmap = {};
+      for (const w of db.prepare('SELECT episode_id, position_sec, duration_sec, completed, updated_at FROM watch_history WHERE profile_id=? AND content_id=?').all(profileId, c.id)) {
+        wmap[w.episode_id === null ? 'm' : w.episode_id] = w;
+      }
+      out.progress = wmap['m'] || null;
+      out.episodes = out.episodes.map(e => ({ ...e, watch: wmap[e.id] || null }));
     }
     res.json({ item: out });
   });
