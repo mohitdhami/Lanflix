@@ -1,10 +1,12 @@
 node_modules/
 data/
-public/posters/c*-*
+public/posters/*
 *.db
 *.db-wal
 *.db-shm
 .DS_Store
+# go build output
+/lanflix
 # local video library (never commit) — keep only the guide files
 media/movies/*
 media/series/*

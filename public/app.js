@@ -534,8 +534,12 @@ async function playContent(contentId, episodeId = null) {
     const now = Date.now();
     if (!force && now - saveThrottle < 5000) return;
     saveThrottle = now;
-    if (!vid.duration || isNaN(vid.duration)) return;
-    api('/api/progress', { method: 'POST', body: JSON.stringify({ profileId: pid, contentId: c.id, episodeId: ep?.id || null, position_sec: vid.currentTime, duration_sec: vid.duration }) }).catch(() => {});
+    // Never store junk: unknown/unplayable media (NaN/Infinity duration,
+    // e.g. .mkv the browser can't play) or trivial <5s opens must not
+    // create rows or clobber a real position with 0.
+    if (!Number.isFinite(vid.duration) || vid.duration <= 0) return;
+    if (!Number.isFinite(vid.currentTime) || vid.currentTime < 5) return;
+    api('/api/progress', { method: 'POST', body: JSON.stringify({ profileId: pid, contentId: c.id, episodeId: ep?.id || null, position_sec: Math.floor(vid.currentTime), duration_sec: Math.floor(vid.duration) }) }).catch(() => {});
   };
   // ---------- custom player controls ----------
   const isSeries = c.type === 'series';
@@ -1036,7 +1040,12 @@ async function viewAdmin() {
       $('#c-add').onclick = () => {
         const f = $('#c-add-form');
         if (f.innerHTML) { f.innerHTML = ''; return; }
-        f.innerHTML = `<div class="panel"><h3>New title</h3><div class="form-grid">
+        f.innerHTML = `<div class="panel"><h3>New title</h3>
+        <div class="form-grid"><div class="full" style="display:flex;gap:6px">
+          <input id="n-imdb" class="tbl-input focusable" placeholder="IMDb link — auto-fill everything" style="flex:1" />
+          <button class="btn btn-light btn-sm focusable" id="n-imdb-go">Auto-fill</button></div>
+          <div class="full" id="n-imdb-st" style="font-size:12px;color:#bbb"></div></div>
+        <div class="form-grid">
           <select id="n-type" class="tbl-input focusable"><option value="movie">Movie</option><option value="series">TV Series</option></select>
           <input id="n-year" class="tbl-input focusable" placeholder="Year (e.g. 2024)" />
           <input id="n-title" class="tbl-input focusable full" placeholder="Title *" />
@@ -1052,6 +1061,25 @@ async function viewAdmin() {
           <button class="btn btn-red btn-sm focusable" id="n-go">Create</button>
           <button class="btn btn-ghost btn-sm" id="n-cancel">Cancel</button></div></div>`;
         $('#n-cancel').onclick = () => f.innerHTML = '';
+        let imdbPick = null;
+        $('#n-imdb-go').onclick = async () => {
+          const v = $('#n-imdb').value.trim();
+          if (!v) return toast('Paste an IMDb link first');
+          $('#n-imdb-st').textContent = 'Fetching from IMDb…';
+          try {
+            const r = await api('/api/admin/imdb', { method: 'POST', body: JSON.stringify({ input: v }) });
+            imdbPick = r;
+            $('#n-type').value = r.type || 'movie';
+            $('#n-title').value = r.title || '';
+            $('#n-year').value = r.year || '';
+            $('#n-desc').value = r.description || '';
+            $('#n-genres').value = (r.genres || []).join(', ');
+            $('#n-cast').value = (r.cast || []).join(', ');
+            $('#n-director').value = r.director || '';
+            $('#n-maturity').value = r.maturity_rating || 'U/A 13+';
+            $('#n-imdb-st').innerHTML = `✓ <b>${esc(r.title)}</b> (${r.year || ''}) • IMDb ${esc(r.imdb_rating || '?')}${r.poster_url ? ` • poster saved` : ''}`;
+          } catch (e) { $('#n-imdb-st').textContent = ''; toast(e.message); }
+        };
         $('#n-go').onclick = async () => {
           const title = $('#n-title').value.trim();
           if (!title) return toast('Title required');
@@ -1060,6 +1088,7 @@ async function viewAdmin() {
               type: $('#n-type').value, title, description: $('#n-desc').value, year: parseInt($('#n-year').value) || null,
               remote_url: $('#n-remote').value.trim(), trailer_url: $('#n-trailer').value.trim(), genres: $('#n-genres').value, cast: $('#n-cast').value,
               director: $('#n-director').value, maturity_rating: $('#n-maturity').value.trim() || 'U/A 13+',
+              poster_path: imdbPick?.poster_path || '', backdrop_path: imdbPick?.backdrop_path || '', imdb_id: imdbPick?.imdb_id || '',
               is_featured: $('#n-feat').checked }) });
             toast('Created — now add posters/episodes via Edit'); viewAdmin();
           } catch (e) { toast(e.message); }
@@ -1151,6 +1180,10 @@ async function viewAdmin() {
           <label style="font-size:12px;color:#bbb;display:flex;gap:6px;align-items:center"><input type="checkbox" id="f-f-${c.id}" ${c.is_featured ? 'checked' : ''}/> Featured (hero)</label>
           <input class="tbl-input full" id="f-r-${c.id}" value="${esc(c.remote_url || '')}" placeholder="Direct video URL (.mp4 — movies)" />
           <input class="tbl-input full" id="f-tr-${c.id}" value="${esc(c.trailer_url || '')}" placeholder="Trailer URL (optional)" />
+          <div class="full" style="display:flex;gap:6px">
+            <input class="tbl-input" id="f-i-${c.id}" value="${esc(c.imdb_id ? ('https://www.imdb.com/title/' + c.imdb_id + '/') : '')}" placeholder="IMDb link to auto-fill" style="flex:1" />
+            <button class="btn btn-light btn-sm" id="f-ig-${c.id}">Auto-fill</button></div>
+          <div class="full" id="f-is-${c.id}" style="font-size:12px;color:#bbb"></div>
           <div class="full" id="f-vid-${c.id}" style="font-size:12px;color:#888">Local file: <code>${esc(c.video_path || '—')}</code>${c.remote_url ? ` &nbsp;•&nbsp; link: <code>${esc(c.remote_url.slice(0, 60))}</code>` : ''}</div>
           ${c.type === 'movie' ? titleDropRow('m' + c.id) : ''}
           <div class="full"><label style="font-size:12px;color:#bbb">Poster: <input type="file" id="f-p-${c.id}" accept="image/*" /></label>
@@ -1158,6 +1191,25 @@ async function viewAdmin() {
           ${c.type === 'series' ? `<div class="full" id="eps-${c.id}" style="border-top:1px solid #333;padding-top:10px">Loading episodes…</div>` : ''}
           </div><div style="margin-top:10px"><button class="btn btn-red btn-sm" id="f-go-${c.id}">Save</button></div></div>`;
         if (c.type === 'series') renderEpManager(c.id);
+        $('#f-ig-' + c.id).onclick = async () => {
+          const v = $('#f-i-' + c.id).value.trim();
+          if (!v) return toast('Paste an IMDb link first');
+          $('#f-is-' + c.id).textContent = 'Fetching from IMDb…';
+          try {
+            const r = await api('/api/admin/imdb', { method: 'POST', body: JSON.stringify({ input: v }) });
+            $('#f-t-' + c.id).value = r.title || c.title;
+            $('#f-y-' + c.id).value = r.year || '';
+            $('#f-d-' + c.id).value = r.description || '';
+            $('#f-g-' + c.id).value = (r.genres || []).join(', ');
+            $('#f-c-' + c.id).value = (r.cast || []).join(', ');
+            $('#f-dir-' + c.id).value = r.director || '';
+            $('#f-m-' + c.id).value = r.maturity_rating || '';
+            if (r.poster_path) c.poster_path = r.poster_path;
+            if (r.backdrop_path) c.backdrop_path = r.backdrop_path;
+            if (r.imdb_id) { c.imdb_id = r.imdb_id; $('#f-i-' + c.id).value = 'https://www.imdb.com/title/' + r.imdb_id + '/'; }
+            $('#f-is-' + c.id).innerHTML = `✓ <b>${esc(r.title)}</b> • IMDb ${esc(r.imdb_rating || '?')} • art saved — hit Save`;
+          } catch (e) { $('#f-is-' + c.id).textContent = ''; toast(e.message); }
+        };
         $('#conv-' + c.id).onclick = async () => {
           const to = c.type === 'series' ? 'movie' : 'series';
           const warn = to === 'movie'
@@ -1185,7 +1237,7 @@ async function viewAdmin() {
         $('#f-go-' + c.id).onclick = async () => {
           const genres = $('#f-g-' + c.id).value.split(',').map(s => s.trim()).filter(Boolean);
           const cast = $('#f-c-' + c.id).value.split(',').map(s => s.trim()).filter(Boolean);
-          await api('/api/admin/content/' + c.id, { method: 'PUT', body: JSON.stringify({ title: $('#f-t-' + c.id).value, year: parseInt($('#f-y-' + c.id).value) || null, maturity_rating: $('#f-m-' + c.id).value, description: $('#f-d-' + c.id).value, genres, cast, director: $('#f-dir-' + c.id).value, remote_url: $('#f-r-' + c.id).value.trim(), trailer_url: $('#f-tr-' + c.id).value.trim(), is_featured: $('#f-f-' + c.id).checked }) });
+          await api('/api/admin/content/' + c.id, { method: 'PUT', body: JSON.stringify({ title: $('#f-t-' + c.id).value, year: parseInt($('#f-y-' + c.id).value) || null, maturity_rating: $('#f-m-' + c.id).value, description: $('#f-d-' + c.id).value, genres, cast, director: $('#f-dir-' + c.id).value, remote_url: $('#f-r-' + c.id).value.trim(), trailer_url: $('#f-tr-' + c.id).value.trim(), poster_path: c.poster_path || '', backdrop_path: c.backdrop_path || '', imdb_id: c.imdb_id || '', is_featured: $('#f-f-' + c.id).checked }) });
           const pf = $('#f-p-' + c.id).files[0], bf = $('#f-b-' + c.id).files[0];
           if (pf || bf) {
             const fd = new FormData();

@@ -26,11 +26,11 @@ Streaming = **direct-play over LAN** (no transcoding → fast, low CPU). Use **.
 
 ```bash
 cd ghhhg
-npm install
-npm start
+go run .
+# or: go build -o lanflix . && ./lanflix
 ```
 
-You'll see:
+Either way you'll see:
 
 ```
 Local: http://localhost:8080
@@ -75,7 +75,7 @@ media/
 }
 ```
 
-Then: open app → **🛠 CRM → 🔄 Rescan media** (or `npm run scan`). Or `POST /api/admin/scan` as admin.
+Then: open app → **🛠 CRM → 🔄 Rescan media**. Or `POST /api/admin/scan` as admin.
 
 **Easiest: drag & drop.** Open **🛠 CRM → Content**, pick Movies or TV Series, and drop the folder straight onto the drop zone (or click it to browse). Files upload to `media/`, get scanned automatically, and appear in the catalog — with a progress bar for big files.
 
@@ -90,15 +90,15 @@ Open **🛠 CRM** in the top nav (admin only):
 - **Views** — who watched what, when
 
 Data lives in `data/lanflix.db` (SQLite). Back it up by copying that file while the server is stopped.
-For testing / experiments, point the server at a copy: `LANFLIX_DB=/tmp/test.db npm start`.
+For testing / experiments, point the server at a copy: `LANFLIX_DB=/tmp/test.db go run .`.
 
 ## 🌐 LAN / TV tips
 
-- Server binds `0.0.0.0:8080` — reachable on your LAN. Allow Node through the firewall if prompted.
+- Server binds `0.0.0.0:8080` — reachable on your LAN. Allow the binary through the firewall if prompted.
 - Same Wi-Fi required. For 4K direct-play, wired Ethernet or 5 GHz Wi-Fi recommended.
 - Smart TV: open the TV **browser** → type the LAN URL → fullscreen. Arrow keys navigate.
-- Custom port: `PORT=9000 npm start`
-- Reset demo: `npm run reset` (wipes DB, reseeds admin + demo catalog)
+- Custom port: `PORT=9000 go run .`
+- Reset demo: `go run . -reset` (wipes DB, reseeds admin + demo catalog)
 
 ## 🔌 API (for a future mobile app)
 
@@ -111,16 +111,25 @@ Profile-scoped routes require the token + a `profileId` you own (kids filter can
 - `GET /api/stream/movie/:id`, `GET /api/stream/episode/:id` (HTTP Range)
 - Admin: `GET /api/admin/stats|users|content|views`, `POST /api/admin/scan`, `POST /api/admin/seed-demo`, `POST /api/admin/content`, `PUT /api/admin/content/:id`, `DELETE /api/admin/content/:id`, `POST /api/admin/episodes`, `DELETE /api/admin/episodes/:id`
 
+## 🎬 IMDb auto-fill (Go backend)
+
+Paste any IMDb link (`https://www.imdb.com/title/tt0133093/`) and LanFlix fills
+title, year, plot, genres, cast, director, maturity, runtime and downloads the
+poster + backdrop into `public/posters/` so they work offline on your LAN:
+
+- **Content → ＋ Add title → Auto-fill**: fills the whole form (poster included)
+- **Edit any title → Auto-fill**: refreshes metadata + art in place
+- Or one-click: `POST /api/admin/imdb/import {"input": "<imdb link>"}` creates
+  the title (deduped by IMDb id)
+
+The lookup is keyed by the IMDb id from your link (direct IMDb pages are
+bot-walled, so metadata resolves through the IMDb-keyed catalog service).
+
 ## 📦 Project layout
 
 ```
-server.js          Express + static + LAN boot
-src/db.js          SQLite schema
-src/auth.js        JWT + bcrypt
-src/scanner.js     media/ folder scanner
-src/seed.js        admin + demo catalog
-src/api.js         all REST routes + range streaming
+main.go + internal/   Go backend (db, auth, api, scanner, seed, imdb)
 public/            Netflix UI (no build step)
 media/             ← put your videos here
-data/              SQLite DB (auto-created)
+data/              SQLite DB (auto-created, shared by both backends)
 ```
