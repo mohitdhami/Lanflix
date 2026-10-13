@@ -198,9 +198,9 @@ func getBrowseRows(w http.ResponseWriter, r *http.Request) {
 			myList = append(myList, rowContent(c))
 		}
 	}
-	hero := q("AND is_featured=1", "views_count DESC, added_at DESC", 5)
+	hero := q("AND is_featured=1", "views_count DESC, added_at DESC", 20)
 	if len(hero) == 0 {
-		hero = q("", "views_count DESC", 5)
+		hero = q("", "views_count DESC", 20)
 	}
 	trending := q("", "views_count DESC", 12)
 	top10 := trending

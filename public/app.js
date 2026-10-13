@@ -36,6 +36,16 @@ function posterImg(c, cls = '') {
   const fb = `this.onerror=null;this.src='data:image/svg+xml;utf8,${encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" width="400" height="600"><rect width="400" height="600" fill="#2a2a2a"/><text x="200" y="300" font-size="34" text-anchor="middle" fill="#888" font-family="Arial">${esc(c.title).slice(0, 22)}</text></svg>`)}'`;
   return `<img loading="lazy" src="${esc(src)}" onerror="${fb}" alt="${esc(c.title)}" />`;
 }
+// Resolves any stored art reference to a viewable src: remote, blob/data,
+// and already-resolved /api/file URLs pass through; raw stored paths
+// (relative or legacy absolute) are served via /api/file.
+const artURL = (p) => {
+  p = String(p || '').trim();
+  if (!p) return '';
+  if (/^(https?:|data:|blob:)/i.test(p)) return p;
+  if (p.startsWith('/api/')) return p;
+  return '/api/file?path=' + encodeURIComponent(p);
+};
 
 /* ================= AUTH ================= */
 function renderAuth(mode = 'login') {
@@ -400,7 +410,7 @@ async function viewHome() {
           <button class="btn btn-info focusable" id="hero-info">ⓘ More Info</button>
         </div>
         <div class="hero-progress" id="hero-progress" style="display:${r.canResume && r.dur ? 'block' : 'none'}"><div class="hero-progress-track"><i style="width:${r.pct}%"></i></div>${r.canResume && r.dur ? `<span>Resume from ${fmtTime(r.pos)} of ${fmtTime(r.dur)}</span>` : '<span></span>'}</div>
-        <div class="hero-dots">${rows.hero.slice(0, 5).map((_, i) => `<span class="${i === S.heroIdx ? 'on' : ''}" data-dot="${i}"></span>`).join('')}</div>
+        <div class="hero-dots">${rows.hero.slice(0, 20).map((_, i) => `<span class="${i === S.heroIdx ? 'on' : ''}" data-dot="${i}"></span>`).join('')}</div>
       </div>`;
     $('#hero-play').onclick = () => playContent(h.id, r.episodeId || undefined);
     $('#hero-info').onclick = () => openDetail(h.id);
@@ -412,7 +422,7 @@ async function viewHome() {
   clearInterval(window.__heroT);
   if (rows.hero.length > 1) window.__heroT = setInterval(() => {
     if (S.view !== 'home' || $('#player-root').innerHTML) return;
-    S.heroIdx = (S.heroIdx + 1) % Math.min(5, rows.hero.length);
+    S.heroIdx = (S.heroIdx + 1) % Math.min(20, rows.hero.length);
     const h = rows.hero[S.heroIdx]; if (h && $('#hero')) paintHero(h);
   }, 9000);
   bindCards();
@@ -513,8 +523,8 @@ async function openDetail(id) {
       <div><span class="green">${c.views_count} plays</span> &nbsp; ${c.year || ''} &nbsp; <span class="badge">${esc(c.maturity_rating || '')}</span> &nbsp; ${c.type === 'movie' ? fmtDur(c.duration_sec) : `${eps.length} episodes`}<br><br>
       <p style="font-size:14.5px;line-height:1.6">${esc(c.description || 'No description.')}</p></div>
       <div class="meta"><b>Cast:</b> ${esc((c.cast || []).join(', ') || '—')}<br><b>Genres:</b> ${esc((c.genres || []).join(', '))}<br><b>Director:</b> ${esc(c.director || '—')}<br><b>Rating:</b> ${c.rating_count ? `${c.rating_avg > 0 ? '👍' : '👎'} ${c.rating_count} vote(s)` : 'No ratings yet'}</div>
-      ${c.type === 'series' ? `<div class="ep-list"><h3 style="margin:6px 0 4px">Episodes ${seasons.length > 1 ? `<select id="season-sel" class="tbl-input focusable" style="max-width:140px;margin-left:10px">${seasons.map(s => `<option>S${s}</option>`).join('')}</select>` : ''}</h3>
-        <div id="epwrap">${eps.map(e => hEp(e)).join('') || '<div class="empty">No episodes found. Add video files under media/series/' + esc(c.title) + '</div>'}</div></div>` : ''}
+      ${c.type === 'series' ? `<div class="ep-list"><h3 style="margin:6px 0 4px">Episodes ${seasons.length > 1 ? `<select id="season-sel" class="tbl-input focusable" style="max-width:150px;margin-left:10px">${seasons.map((s, i) => `<option value="${s}"${i === 0 ? ' selected' : ''}>Season ${s}</option>`).join('')}</select>` : ''}</h3>
+        <div id="epwrap">${(seasons.length > 1 ? eps.filter(e => e.season === seasons[0]) : eps).map(e => hEp(e)).join('') || '<div class="empty">No episodes found. Add video files under media/series/' + esc(c.title) + '</div>'}</div></div>` : ''}
       ${more.length ? `<div class="ep-list"><h3>More Like This</h3><div class="more-row">${more.map(x => `<div class="card focusable" data-open="${x.id}">${posterImg(x)}<div class="cbody"><div class="ctitle">${esc(x.title)}</div></div></div>`).join('')}</div></div>` : ''}
     </div></div></div>`;
   if (!(history.state && history.state.n === window.__modalToken)) window.__modalToken = pushLayer('modal');
@@ -547,7 +557,7 @@ async function openDetail(id) {
   $$('#modal-root .ep').forEach(el => el.onclick = () => { const epId = el.dataset.ep; closeModal(); playContent(c.id, epId); });
   const sel = $('#season-sel');
   if (sel) sel.onchange = () => {
-    const s = parseInt(sel.value.replace('S', ''));
+    const s = parseInt(sel.value, 10);
     $('#epwrap').innerHTML = eps.filter(e => e.season === s).map(e => hEp(e)).join('');
     $$('#modal-root .ep').forEach(el => el.onclick = () => { closeModal(); playContent(c.id, el.dataset.ep); });
   };
@@ -583,11 +593,12 @@ window.addEventListener('popstate', () => {
   if ($('#modal-root').innerHTML) modalExit(true);
 });
 
-/* ================= AUDIO FX ENGINE (WebAudio: volume boost, reverb, vocal, instrument) ================= */
+/* ================= AUDIO FX ENGINE (WebAudio: volume boost, reverb, instrument) ================= */
 const AudioFX = (() => {
-  const DEF = { vol: 1, reverb: false, reverbAmt: 0.35, reverbPreset: 'hall', vocal: false, inst: false, night: false };
+  const DEF = { vol: 1, reverb: false, reverbAmt: 0.35, reverbPreset: 'hall', inst: false, night: false };
   let S_fx = { ...DEF };
   try { Object.assign(S_fx, JSON.parse(localStorage.getItem('lanflix_fx') || '{}')); } catch {}
+  delete S_fx.vocal;
   try { const v = parseFloat(localStorage.getItem('lanflix_vol')); if (Number.isFinite(v)) S_fx.vol = Math.max(0, Math.min(2, v)); } catch {}
   let ctx = null, src = null, curVid = null;
   let input, bass, mid, treble, comp, nightMakeup, dry, convolver, wet, master, limiter, analyser;
@@ -601,7 +612,7 @@ const AudioFX = (() => {
     try {
       localStorage.setItem('lanflix_vol', String(S_fx.vol));
       localStorage.setItem('lanflix_mute', S_fx.vol === 0 ? '1' : '0');
-      localStorage.setItem('lanflix_fx', JSON.stringify({ reverb: S_fx.reverb, reverbAmt: S_fx.reverbAmt, reverbPreset: S_fx.reverbPreset, vocal: S_fx.vocal, inst: S_fx.inst, night: S_fx.night }));
+      localStorage.setItem('lanflix_fx', JSON.stringify({ reverb: S_fx.reverb, reverbAmt: S_fx.reverbAmt, reverbPreset: S_fx.reverbPreset, inst: S_fx.inst, night: S_fx.night }));
     } catch {}
   };
   function makeIR(dur, decay) {
@@ -643,10 +654,10 @@ const AudioFX = (() => {
     if (!ctx) return;
     const t = ctx.currentTime;
     master.gain.setTargetAtTime(S_fx.vol, t, 0.02);
-    // EQ: vocal boosts dialogue mids, instrument gives V-shape for music
+    // EQ: instrument gives V-shape for music
     const low = (S_fx.inst ? 5 : 0);
     const high = (S_fx.inst ? 5 : 0);
-    const m = (S_fx.vocal ? 7 : 0) + (S_fx.inst ? -2 : 0);
+    const m = (S_fx.inst ? -2 : 0);
     bass.gain.setTargetAtTime(low, t, 0.05);
     mid.gain.setTargetAtTime(m, t, 0.05);
     treble.gain.setTargetAtTime(high, t, 0.05);
@@ -725,7 +736,7 @@ const AudioFX = (() => {
       if (!analyser || !arr) return;
       try { analyser.getByteFrequencyData(arr); } catch {}
     },
-    get activeCount() { return (S_fx.reverb ? 1 : 0) + (S_fx.vocal ? 1 : 0) + (S_fx.inst ? 1 : 0) + (S_fx.night ? 1 : 0); },
+    get activeCount() { return (S_fx.reverb ? 1 : 0) + (S_fx.inst ? 1 : 0) + (S_fx.night ? 1 : 0); },
   };
 })();
 
@@ -792,7 +803,7 @@ async function playContent(contentId, episodeId = null) {
             <input type="range" id="pp-vol" class="focusable" min="0" max="2" step="0.01" value="1" title="Volume (↑↓) — up to 200% boost" />
             <span class="vol-pct" id="vol-pct">100%</span>
           </div>
-          <button class="pbtn fx-btn focusable" id="pp-fx" title="Audio effects: reverb, vocal, instrument">✨<span class="dot"></span></button>
+          <button class="pbtn fx-btn focusable" id="pp-fx" title="Audio effects: reverb, instrument">✨<span class="dot"></span></button>
         </div>
         <button class="pbtn focusable" id="pp-full" title="Fullscreen (F)">⛶</button>
       </div>
@@ -809,7 +820,6 @@ async function playContent(contentId, episodeId = null) {
           <label><span style="margin-top:6px">Space</span></label>
           <select id="fx-rev-preset"><option value="studio">Studio — tight</option><option value="room">Room — natural</option><option value="hall">Hall — cinematic</option><option value="cathedral">Cathedral — huge</option></select>
         </div>
-        <div class="fx-row" id="fx-row-vocal"><div class="fx-ico">🎙️</div><div class="fx-meta"><b>Vocal clarity</b><span>Boost dialogue +7dB @ 2kHz</span></div><button class="switch" id="fx-vocal" aria-label="Vocal"></button></div>
         <div class="fx-row" id="fx-row-inst"><div class="fx-ico">🎸</div><div class="fx-meta"><b>Instrument / Music</b><span>V-shape: bass + treble lift</span></div><button class="switch" id="fx-inst" aria-label="Instrument"></button></div>
         <div class="fx-row" id="fx-row-night"><div class="fx-ico">💬</div><div class="fx-meta"><b>Dialogue Boost</b><span>Level loud scenes, lift voices</span></div><button class="switch" id="fx-night" aria-label="Dialogue Boost"></button></div>
         <div class="fx-foot"><button id="fx-reset">Reset FX</button><button id="fx-done">Done</button></div>
@@ -1039,7 +1049,7 @@ async function playContent(contentId, episodeId = null) {
   const paintFx = () => {
     const st = AudioFX.state;
     const sw = (id, on, row) => { const b = $p(id); if (b) b.classList.toggle('on', !!on); const r = row && $p(row); if (r) r.classList.toggle('on', !!on); };
-    sw('fx-reverb', st.reverb, 'fx-row-reverb'); sw('fx-vocal', st.vocal, 'fx-row-vocal');
+    sw('fx-reverb', st.reverb, 'fx-row-reverb');
     sw('fx-inst', st.inst, 'fx-row-inst'); sw('fx-night', st.night, 'fx-row-night');
     if ($p('fx-reverb-opts')) $p('fx-reverb-opts').style.display = st.reverb ? 'block' : 'none';
     if ($p('fx-rev-amt')) $p('fx-rev-amt').value = st.reverbAmt;
@@ -1064,7 +1074,6 @@ async function playContent(contentId, episodeId = null) {
     };
   };
   bindSwitch('fx-reverb', 'reverb', '🏛️ Reverb');
-  bindSwitch('fx-vocal', 'vocal', '🎙️ Vocal clarity');
   bindSwitch('fx-inst', 'inst', '🎸 Instrument');
   bindSwitch('fx-night', 'night', '💬 Dialogue Boost');
   $p('fx-rev-amt').oninput = (e) => { AudioFX.set('reverbAmt', parseFloat(e.target.value)); paintFx(); wake(); };
@@ -1336,10 +1345,22 @@ async function readDropEntryTop(entry, base) {
 }
 async function collectDropFiles(dt) {
   const files = [];
-  for (const it of [...(dt.items || [])].filter(i => i.kind === 'file')) {
-    const entry = it.webkitGetAsEntry ? it.webkitGetAsEntry() : null;
-    if (entry) files.push(...await readDropEntryTop(entry, ''));
-    else { const f = it.getAsFile(); if (f) { f._rel = f.name; files.push(f); } }
+  const items = dt.items;
+  if (items && items.length) {
+    // Grab every entry SYNCHRONOUSLY first: the browser releases the drag
+    // data store when drop dispatch ends, so anything read after the first
+    // await finds a cleared store — that staged only the first file.
+    const jobs = [];
+    for (let i = 0; i < items.length; i++) {
+      const it = items[i];
+      if (!it || it.kind !== 'file') continue;
+      const entry = it.webkitGetAsEntry ? it.webkitGetAsEntry() : null;
+      if (entry) jobs.push(readDropEntryTop(entry, ''));
+      else { const f = it.getAsFile(); if (f) { f._rel = f.name; files.push(f); } }
+    }
+    for (const j of jobs) files.push(...await j);
+  } else if (dt.files && dt.files.length) {
+    for (let i = 0; i < dt.files.length; i++) { const f = dt.files[i]; f._rel = f.name; files.push(f); }
   }
   return files;
 }
@@ -1373,10 +1394,10 @@ const VID_RE = /\.(mp4|webm|mkv|mov|avi|m4v)$/i;
 function parseEpName(fname) {
   const leaf = String(fname).split(/[\\/]/).pop();
   const base = leaf.replace(/\.[^.]+$/, '');
-  let s = null, e = null, token = '';
+  let s = null, e = null, token = '', seasonExplicit = false;
   let m;
-  if ((m = base.match(/[Ss](\d{1,2})\s*[Ee](\d{1,3})/))) { s = +m[1]; e = +m[2]; token = m[0]; }
-  else if ((m = base.match(/(\d{1,2})x(\d{1,3})/))) { s = +m[1]; e = +m[2]; token = m[0]; }
+  if ((m = base.match(/[Ss](\d{1,2})\s*[Ee](\d{1,3})/))) { s = +m[1]; e = +m[2]; token = m[0]; seasonExplicit = true; }
+  else if ((m = base.match(/(\d{1,2})x(\d{1,3})/))) { s = +m[1]; e = +m[2]; token = m[0]; seasonExplicit = true; }
   else if ((m = base.match(/(?:^|[\.\s_\-])[Ee](\d{1,3})(?:[\.\s_\-]|$)/))) { s = 1; e = +m[1]; token = m[0]; }
   else if ((m = base.match(/episode\s*(\d{1,3})/i))) { s = 1; e = +m[1]; token = m[0]; }
   let title;
@@ -1385,7 +1406,19 @@ function parseEpName(fname) {
   } else {
     title = base.replace(/[\._]+/g, ' ').replace(/\s+/g, ' ').trim() || base;
   }
-  return { season: s || 1, episode: e, title };
+  return { season: s || 1, episode: e, title, seasonExplicit };
+}
+// Season hint from folder names in a dropped path, e.g. "Season 2/ep1.mp4"
+// or "Show/S2/E03 Title.mp4" -> 2. Only folder segments are scanned (the
+// filename itself is handled by parseEpName).
+function seasonFromPath(rel) {
+  const segs = String(rel || '').split(/[\\/]/).slice(0, -1);
+  for (const g of segs) {
+    let m;
+    if ((m = g.match(/season[\s._-]*(\d{1,2})/i))) return +m[1];
+    if ((m = g.match(/\bs(\d{1,2})\b/i))) return +m[1];
+  }
+  return null;
 }
 function titleDropRow(uid) {
   return `<div class="mini-drop" id="td-drop-${uid}">Drop video <b>files or a folder</b> here, or
@@ -1434,47 +1467,39 @@ async function renderEpManager(contentId) {
   if (!box) return;
   try {
     const { episodes } = await api('/api/content/' + contentId + '/episodes');
-    box.innerHTML = `<b style="font-size:13px">Episodes (${episodes.length})</b>
-      <div class="mini-drop" id="eb-drop-${contentId}">Drop <b>episode files</b> here — one drop can add a whole season — or
-        <button class="btn btn-ghost btn-sm" id="eb-fi-b-${contentId}">Files…</button>
-        <button class="btn btn-ghost btn-sm" id="eb-fo-b-${contentId}">Folder…</button>
-        <input type="file" id="eb-fi-${contentId}" multiple accept="video/*,.mkv,.avi,.mov,.webm,.m4v" hidden />
-        <input type="file" id="eb-fo-${contentId}" webkitdirectory hidden /></div>
-      <div id="eb-pend-${contentId}"></div>
-      <div id="eb-result-${contentId}"></div>
-      <div id="ep-list-${contentId}">
-      ${episodes.map(e => `<div class="ep-drag" draggable="true" data-epid="${e.id}" style="display:flex;gap:8px;align-items:center;font-size:12.5px;padding:5px 0;border-bottom:1px solid #2a2a2a;cursor:grab">
+    const epSeasons = [...new Set(episodes.map(e => e.season))].sort((a, b) => a - b);
+    const curMax = epSeasons.length ? Math.max(...epSeasons) : 0;
+    const epRow = (e) => `<div class="ep-drag" draggable="true" data-epid="${e.id}" style="display:flex;gap:8px;align-items:center;font-size:12.5px;padding:5px 0;border-bottom:1px solid #2a2a2a;cursor:grab">
         <span style="color:#666;cursor:grab;padding:0 2px" title="Drag to reorder">⠿</span>
         <span style="color:#888">S${e.season} E${e.episode}</span><span style="flex:1">${esc(e.title)}</span>
         <span style="color:#888">${e.video_path ? '💾' : e.remote_url ? '🌐' : '❌'}</span>
-        <button class="btn btn-ghost btn-sm" data-epdel="${e.id}">✕</button></div>`).join('') || '<div style="font-size:12px;color:#888">No episodes yet.</div>'}
+        <button class="btn btn-ghost btn-sm" data-epdel="${e.id}">✕</button></div>`;
+    // Drop zones live beneath their own season only — no generic zone.
+    // Files take the zone's season (S##E## in the name still wins).
+    const seasonZone = (s) => `<div class="mini-drop eb-drop-s" data-season="${s}" style="margin:6px 0 10px">Drop <b>single or multiple files</b> for <b>Season ${s}</b> here, or <button class="btn btn-ghost btn-sm" data-browse-s="${s}" data-bmode="files">Browse…</button> <button class="btn btn-ghost btn-sm" data-browse-s="${s}" data-bmode="folder">Folder…</button></div>`;
+    box.innerHTML = `<b style="font-size:13px">Episodes (${episodes.length})${epSeasons.length > 1 ? ` • ${epSeasons.length} seasons` : ''}</b>
+      <input type="file" id="eb-fi-${contentId}" multiple accept="video/*,.mkv,.avi,.mov,.webm,.m4v" hidden />
+      <input type="file" id="eb-fo-${contentId}" webkitdirectory hidden />
+      <div id="ep-list-${contentId}">
+      ${epSeasons.map(s => `
+      <div class="eb-group" data-season="${s}">
+        <div style="font-size:11.5px;font-weight:800;letter-spacing:.5px;color:#bbb;text-transform:uppercase;margin:8px 0 2px">Season ${s} <span style="color:#666;font-weight:600">(${episodes.filter(e => e.season === s).length})</span></div>
+        ${episodes.filter(e => e.season === s).map(e => epRow(e)).join('')}
+        ${seasonZone(s)}
+      </div>`).join('') || '<div style="font-size:12px;color:#888">No episodes yet — start a season below, then drop files into its zone.</div>'}
       </div>
       ${episodes.length > 1 ? '<div style="font-size:11.5px;color:#777;margin-top:2px">Drag rows by ⠿ to rearrange — order saves on drop.</div>' : ''}
-      <div style="display:flex;gap:6px;margin-top:8px;flex-wrap:wrap">
-        <input class="tbl-input" id="ne-s-${contentId}" placeholder="S#" style="max-width:56px" />
-        <input class="tbl-input" id="ne-e-${contentId}" placeholder="E# (auto)" style="max-width:70px" />
-        <input class="tbl-input" id="ne-t-${contentId}" placeholder="Episode title *" style="flex:1;min-width:140px" />
-        <input class="tbl-input" id="ne-u-${contentId}" placeholder="Direct video URL (.mp4)" style="flex:1;min-width:140px" />
-        <button class="btn btn-light btn-sm" id="ne-go-${contentId}">Add</button></div>
-      <div style="font-size:11.5px;color:#777;margin-top:4px">Single remote-URL episode? Use the row above. Local files? Use the drop zone — S/E/title are pre-filled from filenames and editable before upload.</div>`;
+      <div id="eb-pend-${contentId}"></div>
+      <div id="eb-result-${contentId}"></div>
+      <div style="margin-top:10px"><button class="btn btn-ghost btn-sm" id="eb-newseason-${contentId}">＋ Start Season ${curMax + 1}</button></div>
+      <div style="font-size:11.5px;color:#777;margin-top:6px">Each drop accepts one file or many — S/E/title are pre-filled from names and editable in the staging table before upload.</div>`;
     $$('[data-epdel]', box).forEach(b => b.onclick = async () => {
       if (!confirm('Delete this episode?')) return;
       await api('/api/admin/episodes/' + b.dataset.epdel, { method: 'DELETE' });
       renderEpManager(contentId);
     });
     wireEpDrag(contentId, episodes);
-    $('#ne-go-' + contentId).onclick = async () => {
-      const title = $('#ne-t-' + contentId).value.trim();
-      if (!title) return toast('Episode title required');
-      try {
-        await api('/api/admin/episodes', { method: 'POST', body: JSON.stringify({
-          content_id: contentId, season: parseInt($('#ne-s-' + contentId).value) || 1,
-          episode: parseInt($('#ne-e-' + contentId).value) || undefined,
-          title, remote_url: $('#ne-u-' + contentId).value.trim() }) });
-        toast('Episode added'); renderEpManager(contentId);
-      } catch (e) { toast(e.message); }
-    };
-    wireEpBulkDrop(contentId);
+    wireEpBulkDrop(contentId, Math.max(1, curMax));
   } catch (e) { box.innerHTML = `<span style="color:#f99;font-size:12px">Failed to load episodes</span>`; }
 }
 // Pure helper: new S/E assignment after dragging one row to a new visual
@@ -1559,13 +1584,17 @@ function wireEpDrag(contentId, episodes) {
 }
 // Bulk episode staging: drop/pick MANY files at once, review + edit S/E/title
 // per file in one table, then upload everything with a single click.
-function wireEpBulkDrop(contentId) {
-  const dz = $('#eb-drop-' + contentId), pendBox = $('#eb-pend-' + contentId);
-  if (!dz || !pendBox) return;
+function wireEpBulkDrop(contentId, defSeason) {
+  const pendBox = $('#eb-pend-' + contentId);
+  if (!pendBox) return;
+  defSeason = (/^\d+$/.test(String(defSeason)) && +defSeason > 0) ? +defSeason : 1;
+  // Fallback only: every drop comes from a season zone, so presetS is
+  // always set. Season is never asked anywhere else in the bulk flow.
+  const targetS = defSeason;
   const staged = [];
   const paint = () => {
     if (!staged.length) { pendBox.innerHTML = ''; return; }
-    pendBox.innerHTML = `<div style="font-size:12px;color:#bbb;margin:6px 0">${staged.length} file(s) staged — check S/E/title, then upload once:</div>
+    pendBox.innerHTML = `<div style="font-size:12px;color:#bbb;margin:6px 0">${staged.length} file(s) staged — check S/E/title, then upload once:<br><span style="color:#888">Each file takes its drop zone's season (S##E## in the name wins).</span></div>
       <div style="max-height:220px;overflow:auto;border:1px solid #2a2a2a;border-radius:6px">
       <table style="width:100%;font-size:12px"><tr style="color:#888;text-align:left"><th>File</th><th style="width:52px">S</th><th style="width:64px">E</th><th>Title</th><th style="width:30px"></th></tr>
       ${staged.map((s, i) => `<tr>
@@ -1575,8 +1604,6 @@ function wireEpBulkDrop(contentId) {
         <td><input class="tbl-input" data-br="${i}" data-bf="title" value="${esc(s.title)}" style="min-width:120px" /></td>
         <td><button class="btn btn-ghost btn-sm" data-brm="${i}">✕</button></td></tr>`).join('')}</table></div>
       <div style="display:flex;gap:8px;margin-top:6px;align-items:center;flex-wrap:wrap">
-        <label style="font-size:12px;color:#bbb">Season for all: <input class="tbl-input" id="eb-sall-${contentId}" placeholder="—" style="max-width:52px" /></label>
-        <button class="btn btn-ghost btn-sm" id="eb-apply-s-${contentId}">Apply</button>
         <button class="btn btn-light btn-sm" id="eb-up-${contentId}">Upload ${staged.length} episode(s)</button>
         <button class="btn btn-ghost btn-sm" id="eb-cl-${contentId}">Clear</button>
         <span id="eb-st-${contentId}" style="font-size:12px;color:#bbb"></span></div>`;
@@ -1587,12 +1614,6 @@ function wireEpBulkDrop(contentId) {
     });
     $$('[data-brm]', pendBox).forEach(b => b.onclick = () => { staged.splice(+b.dataset.brm, 1); paint(); });
     $('#eb-cl-' + contentId).onclick = () => { staged.length = 0; paint(); };
-    $('#eb-apply-s-' + contentId).onclick = () => {
-      const v = $('#eb-sall-' + contentId).value.trim();
-      if (!/^\d+$/.test(v)) return toast('Season must be a number');
-      staged.forEach(s => s.season = v);
-      paint();
-    };
     $('#eb-up-' + contentId).onclick = () => {
       const setStatus = (m) => { const el = $('#eb-st-' + contentId); if (el) el.textContent = m; };
       const toInt = (v) => (/^\d+$/.test(String(v).trim()) ? parseInt(v, 10) : 0);
@@ -1610,29 +1631,76 @@ function wireEpBulkDrop(contentId) {
       }, meta);
     };
   };
-  const add = (files) => {
-    let n = 0;
+  const add = (files, presetS = null) => {
+    let n = 0, bad = 0;
     for (const f of files) {
       const rel = dropRel(f);
-      if (!rel || !VID_RE.test(rel)) continue;
+      if (!rel || !VID_RE.test(rel)) { bad++; continue; }
       if (staged.some(p => p.rel === rel && p.file.size === f.size && p.file.lastModified === f.lastModified)) continue;
       const parsed = parseEpName(rel);
-      staged.push({ file: f, rel, season: parsed.season, episode: parsed.episode ?? '', title: parsed.title });
+      // Season priority: explicit S##E## in filename > the zone it was
+      // dropped into > Season N folder in path > Season box.
+      const season = parsed.seasonExplicit ? parsed.season : (presetS ?? seasonFromPath(rel) ?? targetS);
+      staged.push({ file: f, rel, season, episode: parsed.episode ?? '', title: parsed.title });
       n++;
     }
     // stable order so auto-numbering matches what the server assigns
     staged.sort((a, b) => a.rel < b.rel ? -1 : a.rel > b.rel ? 1 : 0);
     paint();
-    if (!n && !staged.length) toast('No video files in that selection');
-    else if (n) toast(`${n} file(s) staged — review S/E/title, then Upload`);
+    const badMsg = bad ? ` (${bad} skipped — needs .mp4/.mkv/.webm/.mov/.avi/.m4v)` : '';
+    if (!n && !staged.length) toast(bad ? `${bad} file(s) skipped — unsupported format (use .mp4/.mkv/.webm/.mov/.avi/.m4v)` : 'No video files in that selection');
+    else if (n) {
+      toast(`${n} file(s) staged — review S/E/title, then Upload${badMsg}`);
+      try { pendBox.scrollIntoView({ block: 'nearest' }); } catch {}
+    }
   };
-  $('#eb-fi-b-' + contentId).onclick = () => $('#eb-fi-' + contentId).click();
-  $('#eb-fo-b-' + contentId).onclick = () => $('#eb-fo-' + contentId).click();
-  $('#eb-fi-' + contentId).onchange = (e) => { add([...e.target.files]); e.target.value = ''; };
-  $('#eb-fo-' + contentId).onchange = (e) => { add([...e.target.files]); e.target.value = ''; };
-  ['dragenter', 'dragover'].forEach(ev => dz.addEventListener(ev, (e) => { e.preventDefault(); e.stopPropagation(); dz.classList.add('over'); }));
-  ['dragleave', 'drop'].forEach(ev => dz.addEventListener(ev, (e) => { e.preventDefault(); e.stopPropagation(); dz.classList.remove('over'); }));
-  dz.addEventListener('drop', async (e) => add(await collectDropFiles(e.dataTransfer)));
+  // One shared staging table: every season zone (drop, Browse files,
+  // Browse folder) feeds it, so single and multiple drops all upload
+  // together via Upload.
+  let browseSeason = null;
+  const wireZone = (zone, season) => {
+    if (!zone || zone._wired) return; zone._wired = true;
+    ['dragenter', 'dragover'].forEach(ev => zone.addEventListener(ev, (e) => { e.preventDefault(); e.stopPropagation(); zone.classList.add('over'); }));
+    ['dragleave', 'drop'].forEach(ev => zone.addEventListener(ev, (e) => { e.preventDefault(); e.stopPropagation(); zone.classList.remove('over'); }));
+    zone.addEventListener('drop', async (e) => add(await collectDropFiles(e.dataTransfer), season));
+  };
+  const wireBrowseBtns = (root) => {
+    $$('[data-browse-s]', root).forEach(b => {
+      if (b._wired) return; b._wired = true;
+      b.onclick = (e) => {
+        e.stopPropagation();
+        browseSeason = +b.dataset.browseS;
+        $(b.dataset.bmode === 'folder' ? '#eb-fo-' + contentId : '#eb-fi-' + contentId).click();
+      };
+    });
+  };
+  $('#eb-fi-' + contentId).onchange = (e) => { add([...e.target.files], browseSeason); browseSeason = null; e.target.value = ''; };
+  $('#eb-fo-' + contentId).onchange = (e) => { add([...e.target.files], browseSeason); browseSeason = null; e.target.value = ''; };
+  const mgrRoot = $('#eps-' + contentId);
+  if (mgrRoot) {
+    $$('.eb-drop-s', mgrRoot).forEach(z => wireZone(z, +z.dataset.season));
+    wireBrowseBtns(mgrRoot);
+  }
+  // Start-a-season button: appends the next chronological season group
+  // (max + 1) with its own drop zone. Groups vanish on re-render unless
+  // files were staged/uploaded into them.
+  const nsBtn = $('#eb-newseason-' + contentId);
+  if (nsBtn) nsBtn.onclick = () => {
+    const list = $('#ep-list-' + contentId);
+    if (!list) return;
+    const n = Math.max(0, ...$$('.eb-group', list).map(g => +g.dataset.season)) + 1;
+    [...list.children].forEach(ch => { if (!ch.classList || !ch.classList.contains('eb-group')) ch.remove(); });
+    const wrap = document.createElement('div');
+    wrap.className = 'eb-group'; wrap.dataset.season = n;
+    wrap.innerHTML = `<div style="font-size:11.5px;font-weight:800;letter-spacing:.5px;color:#bbb;text-transform:uppercase;margin:8px 0 2px">Season ${n} <span style="color:#666;font-weight:600">(new)</span></div>
+      <div class="mini-drop eb-drop-s" data-season="${n}" style="margin:6px 0 10px">Drop <b>single or multiple files</b> for <b>Season ${n}</b> here, or <button class="btn btn-ghost btn-sm" data-browse-s="${n}" data-bmode="files">Browse…</button> <button class="btn btn-ghost btn-sm" data-browse-s="${n}" data-bmode="folder">Folder…</button></div>`;
+    list.appendChild(wrap);
+    wireZone(wrap.querySelector('.eb-drop-s'), n);
+    wireBrowseBtns(wrap);
+    nsBtn.textContent = `＋ Start Season ${n + 1}`;
+    toast(`Season ${n} started — drop files into its zone`);
+    try { wrap.scrollIntoView({ block: 'nearest' }); } catch {}
+  };
 }
 async function viewAdmin() {
   if (S.user?.role !== 'admin') { $('#view').innerHTML = `<div class="page"><div class="empty">Admins only.</div></div>`; return; }
@@ -1759,7 +1827,7 @@ async function viewAdmin() {
           ${items.map(c => `<tr data-t="${esc(c.title.toLowerCase())}"><td style="max-width:200px"><b>${esc(c.title)}</b><br><span style="color:#888;font-size:12px">${esc((c.description || '').slice(0, 60))}</span></td>
             <td><span class="pill">${c.type}</span></td><td>${c.year || '—'}</td><td style="max-width:150px">${esc((c.genres || []).join(', '))}</td><td>${c.views_count}</td>
             <td>${c.is_featured ? '⭐' : ''}</td><td>${c.video_path ? '💾 local' : c.remote_url ? '🌐 demo' : '❌ none'}</td>
-            <td><div style="display:flex;gap:6px;flex-wrap:wrap"><button class="btn btn-ghost btn-sm" data-cedit="${c.id}">Edit</button><button class="btn btn-ghost btn-sm" data-cdel="${c.id}">Delete</button></div><div id="ce-${c.id}"></div></td></tr>`).join('')}</table></div>`;
+            <td><div style="display:flex;gap:6px;flex-wrap:wrap"><button class="btn btn-ghost btn-sm" data-cedit="${c.id}">Edit</button><button class="btn btn-ghost btn-sm" data-cdel="${c.id}">Delete</button></div></td></tr>`).join('')}</table></div>`;
       $('#c-add').onclick = () => {
         const f = $('#c-add-form');
         if (f.innerHTML) { f.innerHTML = ''; return; }
@@ -1887,12 +1955,23 @@ async function viewAdmin() {
       });
       $$('[data-cedit]', main).forEach(b => b.onclick = async () => {
         const c = items.find(x => x.id == b.dataset.cedit);
-        const box = $('#ce-' + c.id);
-        box.innerHTML = `<div class="panel" style="margin-top:8px;min-width:280px">
-        <div style="display:flex;gap:8px;align-items:center;margin-bottom:10px">
+        // Edit opens in a 90%-window modal card (not inline). All field IDs
+        // stay the same so episode/drop/save wiring works unchanged.
+        $('#modal-root').innerHTML = `
+        <div class="modal-back" id="edit-back"><div class="modal modal-edit">
+        <button class="modal-close focusable" id="edit-x">✕</button>
+        <div class="edit-top"><h2>Edit — ${esc(c.title)}</h2>
           <span class="pill">${c.type === 'series' ? '📺 series' : '🎬 movie'}</span>
-          <button class="btn btn-ghost btn-sm" id="conv-${c.id}">Convert to ${c.type === 'series' ? 'movie' : 'series'}</button>
+          <button class="btn btn-ghost btn-sm focusable" id="conv-${c.id}">Convert to ${c.type === 'series' ? 'movie' : 'series'}</button>
         </div><div class="form-grid">
+          <div class="full" style="display:flex;gap:14px;align-items:flex-start;margin-bottom:2px">
+            <div><div style="font-size:11px;color:#888;margin-bottom:4px">Poster</div>
+              <div id="f-pp-${c.id}" style="width:96px;height:144px;border:1px dashed #555;border-radius:6px;display:flex;align-items:center;justify-content:center;font-size:11px;color:#777;text-align:center">No poster</div>
+              <img id="f-pv-${c.id}" alt="Poster" style="width:96px;height:144px;object-fit:cover;border-radius:6px;display:none" onerror="this.style.display='none';var p=document.getElementById('f-pp-${c.id}');if(p)p.style.display='flex';" /></div>
+            <div style="flex:1;min-width:0"><div style="font-size:11px;color:#888;margin-bottom:4px">Cover</div>
+              <div id="f-bp-${c.id}" style="max-width:420px;height:144px;border:1px dashed #555;border-radius:6px;display:flex;align-items:center;justify-content:center;font-size:11px;color:#777;text-align:center">No cover</div>
+              <img id="f-bv-${c.id}" alt="Cover" style="width:100%;max-width:420px;height:144px;object-fit:cover;border-radius:6px;display:none" onerror="this.style.display='none';var p=document.getElementById('f-bp-${c.id}');if(p)p.style.display='flex';" /></div>
+          </div>
           <input class="tbl-input full" id="f-t-${c.id}" value="${esc(c.title)}" placeholder="Title" />
           <input class="tbl-input" id="f-y-${c.id}" value="${c.year || ''}" placeholder="Year" />
           <input class="tbl-input" id="f-m-${c.id}" value="${esc(c.maturity_rating)}" placeholder="Maturity" />
@@ -1912,7 +1991,31 @@ async function viewAdmin() {
           <div class="full"><label style="font-size:12px;color:#bbb">Poster: <input type="file" id="f-p-${c.id}" accept="image/*" /></label>
           <label style="font-size:12px;color:#bbb;margin-left:10px">Backdrop: <input type="file" id="f-b-${c.id}" accept="image/*" /></label></div>
           ${c.type === 'series' ? `<div class="full" id="eps-${c.id}" style="border-top:1px solid #333;padding-top:10px">Loading episodes…</div>` : ''}
-          </div><div style="margin-top:10px"><button class="btn btn-red btn-sm" id="f-go-${c.id}">Save</button></div></div>`;
+          </div><div style="margin-top:14px;display:flex;gap:10px"><button class="btn btn-red btn-sm focusable" id="f-go-${c.id}">Save</button><button class="btn btn-ghost btn-sm focusable" id="edit-cancel-${c.id}">Cancel</button></div></div></div>`;
+        $('#edit-x').onclick = () => closeModal();
+        $('#edit-cancel-' + c.id).onclick = () => closeModal();
+        $('#edit-back').onclick = (e) => { if (e.target.id === 'edit-back') closeModal(); };
+        // Live art previews: existing art, IMDb auto-fill, and picked files
+        // all repaint the strip. (Blob previews never persist — Save sends
+        // poster_path/backdrop_path, not the preview URL.)
+        const paintArt = () => {
+          const ps = artURL(c.poster || c.poster_path), bs = artURL(c.backdrop || c.backdrop_path);
+          const pv = $('#f-pv-' + c.id), pp = $('#f-pp-' + c.id);
+          if (pv) { if (ps) pv.src = ps; pv.style.display = ps ? 'block' : 'none'; }
+          if (pp) pp.style.display = ps ? 'none' : 'flex';
+          const bv = $('#f-bv-' + c.id), bp = $('#f-bp-' + c.id);
+          if (bv) { if (bs) bv.src = bs; bv.style.display = bs ? 'block' : 'none'; }
+          if (bp) bp.style.display = bs ? 'none' : 'flex';
+        };
+        paintArt();
+        $('#f-p-' + c.id).onchange = (e) => {
+          const f = e.target.files[0];
+          if (f) { try { c.poster = URL.createObjectURL(f); } catch {} paintArt(); }
+        };
+        $('#f-b-' + c.id).onchange = (e) => {
+          const f = e.target.files[0];
+          if (f) { try { c.backdrop = URL.createObjectURL(f); } catch {} paintArt(); }
+        };
         if (c.type === 'series') renderEpManager(c.id);
         $('#f-ig-' + c.id).onclick = async () => {
           const v = $('#f-i-' + c.id).value.trim();
@@ -1929,6 +2032,9 @@ async function viewAdmin() {
             $('#f-m-' + c.id).value = r.maturity_rating || '';
             if (r.poster_path) c.poster_path = r.poster_path;
             if (r.backdrop_path) c.backdrop_path = r.backdrop_path;
+            if (r.poster_url) c.poster = r.poster_url;
+            if (r.backdrop_url) c.backdrop = r.backdrop_url;
+            try { paintArt(); } catch {}
             if (r.imdb_id) { c.imdb_id = r.imdb_id; $('#f-i-' + c.id).value = 'https://www.imdb.com/title/' + r.imdb_id + '/'; }
             $('#f-is-' + c.id).innerHTML = `✓ <b>${esc(r.title)}</b> • IMDb ${esc(r.imdb_rating || '?')} • art saved — hit Save`;
           } catch (e) { $('#f-is-' + c.id).textContent = ''; toast(e.message); }
@@ -1941,8 +2047,9 @@ async function viewAdmin() {
           if (!confirm(warn)) return;
           try {
             await api('/api/admin/content/' + c.id + '/convert', { method: 'POST', body: JSON.stringify({ type: to }) });
-            toast(`Converted to ${to} — reopen Edit to manage it`);
-            viewAdmin();
+            toast(`Converted to ${to}`);
+            closeModal(); await viewAdmin();
+            document.querySelector(`[data-cedit="${c.id}"]`)?.click();
           } catch (e) { toast(e.message); }
         };
         if (c.type === 'movie') wireTitleDrop('m' + c.id, (files, setStatus, done) => {
@@ -1969,7 +2076,7 @@ async function viewAdmin() {
             const headers = {}; if (store.token) headers.Authorization = 'Bearer ' + store.token;
             await fetch('/api/admin/content/' + c.id + '/poster', { method: 'POST', headers, body: fd });
           }
-          toast('Saved'); viewAdmin();
+          toast('Saved'); closeModal(); viewAdmin();
         };
       });
     } else if (t === 'views') {

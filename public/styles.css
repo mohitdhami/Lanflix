@@ -102,7 +102,7 @@ a{color:inherit}
 .btn-play:hover{background:rgba(255,255,255,.75)}
 .btn-info{background:rgba(109,109,110,.7);color:#fff;font-size:16px;padding:12px 24px;border-radius:5px}
 .btn-info:hover{background:rgba(109,109,110,.45)}
-.hero-dots{display:flex;gap:6px;margin-top:20px;margin-bottom:10px;padding-bottom:2px}
+.hero-dots{display:flex;gap:6px;row-gap:5px;margin-top:20px;margin-bottom:10px;padding-bottom:2px;flex-wrap:wrap;max-width:480px}
 .hero-dots span{width:22px;height:3px;background:#555;border-radius:2px;cursor:pointer}
 .hero-dots span.on{background:#fff}
 /* ---------- view slider transitions (page switch, not refresh) ---------- */
@@ -194,6 +194,11 @@ body.navigating .nav-links{pointer-events:none;opacity:.75}
 .more-row{display:flex;gap:10px;overflow-x:auto;padding:6px 0}
 .more-row .card{width:150px;flex-shrink:0}
 .more-row .card img{height:210px}
+/* ---------- admin edit modal (90% window card) ---------- */
+#edit-back{align-items:center;padding:5vh 5vw}
+.modal-edit{width:90vw;max-width:1200px;max-height:90vh;overflow-y:auto;padding:24px 26px}
+.modal-edit .edit-top{display:flex;align-items:center;gap:12px;margin-bottom:14px}
+.modal-edit .edit-top h2{font-size:22px;flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 
 /* ---------- player ---------- */
 .player{position:fixed;inset:0;background:#000;z-index:200;display:flex;flex-direction:column}
