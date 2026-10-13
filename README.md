@@ -9,11 +9,11 @@ You manage everything locally (users, content, analytics). No cloud, no subscrip
 |---|---|
 | Login / accounts | ✅ Email + password, first account becomes admin |
 | Who's watching profiles (5/account) | ✅ Avatars, Kids mode, PIN lock |
-| Home rows, hero billboard, Top 10 | ✅ Trending, New, Top 10, genre rows |
+| Home rows, hero billboard (20 featured), Top 10 | ✅ Trending, New, Top 10, genre rows; hero rotates up to 20 featured with ▶ Play / ⏵ Resume per profile + progress |
 | Search + genres + Movies / TV Shows | ✅ Instant search, genre chips |
-| Detail page + episodes + More like this | ✅ Modal with cast, ratings, seasons |
-| Player: resume, autoplay next, skip intro, subtitles | ✅ Custom Netflix-style player: play/pause, ±10s, seek bar + buffer, speed (0.5–2×), volume, CC menu, fullscreen, PiP, prev/next episode, episodes drawer, auto-hide, shortcuts, screen lock |
-| Continue Watching + progress sync per profile | ✅ Saved every 5s, resume prompt |
+| Detail page + episodes + More like this | ✅ Modal with cast, ratings, season filter (opens on the first season) |
+| Player: resume, autoplay next, skip intro, subtitles | ✅ Custom Netflix-style player: play/pause, ±10s, seek bar + buffer, speed (0.5–2×), volume boost to 200%, CC menu, fullscreen, PiP, prev/next episode, episodes drawer, auto-hide, shortcuts, screen lock — plus Audio FX: reverb presets (studio→cathedral), Instrument EQ, 💬 Dialogue Boost (compresses loud scenes + lifts voices with a peak limiter) |
+| Continue Watching + progress sync per profile | ✅ Saved every 5s, one card per title (latest unfinished episode), resume prompt |
 | My List, 👍👎 ratings | ✅ Per-profile |
 | Kids mode | ✅ Hides 16+/18+ |
 | TV remote navigation | ✅ Arrow keys + Enter, TV-friendly UI |
@@ -25,7 +25,7 @@ Streaming = **direct-play over LAN** (no transcoding → fast, low CPU). Use **.
 ## 🚀 Run (2 minutes)
 
 ```bash
-cd ghhhg
+cd LANFLIX
 go run .
 # or: go build -o lanflix . && ./lanflix
 ```
@@ -86,7 +86,7 @@ Supported video: `.mp4 .webm .mkv .mov .avi .m4v` • posters: `.jpg .png .webp`
 Open **🛠 CRM** in the top nav (admin only):
 - **Overview** — users, plays, storage used, 7-day chart, top content, restore-demo-catalog button
 - **Users** — create/disable/reset-password/delete users, change roles (LAN-only accounts; you can't demote/disable yourself)
-- **Content** — **add** titles (direct video links), edit metadata/sources/featured flag, convert movie↔series, manage series episodes, upload poster/backdrop, delete. Open any title's Edit to **attach more files** — drop files/folders or use Files…/Folder… pickers; episode uploads auto-create episode rows for series, video uploads link (or replace) the movie file
+- **Content** — **add** titles (direct video links), then **Edit** any title in a 90%-window card with live **poster + cover previews** (they update on IMDb auto-fill and on file pick, before Save). Edit metadata/sources, convert movie↔series, manage series episodes, upload poster/backdrop, delete. **Featured is managed only via the ⭐ star in the table** (no control in the edit card) — the header shows live usage as `⭐ n/20`, and featuring blocks at 20/20 until something is unfeatured (enforced in the API too). Series episodes are grouped by season, each with its own drop zone beneath it (single or multiple files); staged files land in one review table (S/E/title editable) and upload together; **＋ Start Season** appends the next chronological season. S/E auto-detect from `S02E03` / `2x03` names and `Season N` folders — anything skipped reports its reason.
 - **Views** — who watched what, when
 
 Data lives in `data/lanflix.db` (SQLite). Back it up by copying that file while the server is stopped.
@@ -109,7 +109,7 @@ Profile-scoped routes require the token + a `profileId` you own (kids filter can
 - `GET /api/browse/rows?profileId=`, `GET /api/content?search=&genre=&type=`, `GET /api/content/:id`, `GET /api/content/:id/episodes`
 - `GET/POST/DELETE /api/mylist`, `POST /api/rate`, `POST /api/progress`, `POST /api/content/:id/view`, `GET /api/history`
 - `GET /api/stream/movie/:id`, `GET /api/stream/episode/:id` (HTTP Range)
-- Admin: `GET /api/admin/stats|users|content|views`, `POST /api/admin/scan`, `POST /api/admin/seed-demo`, `POST /api/admin/content`, `PUT /api/admin/content/:id`, `DELETE /api/admin/content/:id`, `POST /api/admin/episodes`, `DELETE /api/admin/episodes/:id`
+- Admin: `GET /api/admin/stats|users|content|views`, `POST /api/admin/scan`, `POST /api/admin/seed-demo`, `POST /api/admin/content`, `PUT /api/admin/content/:id`, `DELETE /api/admin/content/:id`, `POST /api/admin/content/:id/convert`, `POST /api/admin/content/:id/poster`, `POST /api/admin/upload` (movies + bulk series episodes with per-file S/E), `POST /api/admin/episodes`, `POST /api/admin/episodes/reorder`, `DELETE /api/admin/episodes/:id`, `POST /api/admin/imdb`, `POST /api/admin/imdb/import`
 
 ## 🎬 IMDb auto-fill (Go backend)
 
@@ -124,6 +124,10 @@ poster + backdrop into `public/posters/` so they work offline on your LAN:
 
 The lookup is keyed by the IMDb id from your link (direct IMDb pages are
 bot-walled, so metadata resolves through the IMDb-keyed catalog service).
+Both the movie and series catalogs are consulted; of the id-matching
+records the richer one wins (episode videos, credits and release info break
+ties), so a misfiled catalog entry can't hijack a title with a wrong
+plot — e.g. `tt32379268` correctly resolves to *Jamnapaar*, not *The Interview*.
 
 ## 📦 Project layout
 

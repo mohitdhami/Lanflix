@@ -15,6 +15,15 @@ import (
 
 func isAdmin(uid int64, role string) bool { return role == "admin" }
 
+// maxFeatured caps the home hero. The Content table star is the only UI
+// that (un)features, and both create + update paths enforce the cap so a
+// 21st title can never slip in (even via direct API calls or races).
+const maxFeatured = 20
+
+func featuredFull(exceptID int64) bool {
+	return db.Count(`SELECT COUNT(*) FROM content WHERE is_featured=1 AND id != ?`, exceptID) >= maxFeatured
+}
+
 func adminOnly(next func(http.ResponseWriter, *http.Request, int64, string)) http.HandlerFunc {
 	return auth.RequireAuth(func(w http.ResponseWriter, r *http.Request, uid int64, role string) {
 		if role != "admin" {
@@ -204,6 +213,10 @@ func postAdminContent(w http.ResponseWriter, r *http.Request, uid int64, role st
 	if bv, ok := b["is_featured"].(bool); (ok && bv) || num(b["is_featured"], 0) == 1 {
 		feat = 1
 	}
+	if feat == 1 && featuredFull(0) {
+		E(w, 400, "Featured is full (20/20) — unfeature a title first")
+		return
+	}
 	var year any
 	if y, present := b["year"]; present && num(y, 0) != 0 {
 		year = num(y, 0)
@@ -283,6 +296,10 @@ func putAdminContent(w http.ResponseWriter, r *http.Request, uid int64, role str
 		if bv, ok := v.(bool); (ok && bv) || num(v, 0) == 1 {
 			feat = 1
 		}
+	}
+	if feat == 1 && intVal(c["is_featured"]) == 0 && featuredFull(cid) {
+		E(w, 400, "Featured is full (20/20) — unfeature a title first")
+		return
 	}
 	db.Conn.Exec(`UPDATE content SET title=?,description=?,year=?,genres=?,cast=?,director=?,maturity_rating=?,duration_sec=?,poster_path=?,backdrop_path=?,trailer_url=?,video_path=?,remote_url=?,is_featured=?,imdb_id=? WHERE id=?`,
 		title, desc, year, genres, cast, keep("director"), keep("maturity_rating"), dur,

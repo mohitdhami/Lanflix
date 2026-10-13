@@ -484,6 +484,10 @@ func postAdminImdbImport(w http.ResponseWriter, r *http.Request, uid int64, role
 	if bv, ok := b["is_featured"].(bool); ok && bv {
 		feat = 1
 	}
+	if feat == 1 && featuredFull(0) {
+		E(w, 400, "Featured is full (20/20) — unfeature a title first")
+		return
+	}
 	gb, _ := json.Marshal(info.Genres)
 	cb, _ := json.Marshal(info.Cast)
 	res, err := db.Conn.Exec(`INSERT INTO content (type,title,description,year,genres,cast,director,maturity_rating,duration_sec,poster_path,backdrop_path,remote_url,is_featured,imdb_id)

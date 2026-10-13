@@ -63,7 +63,13 @@ func getJSON(url string, v any) error {
 // FetchMeta resolves an IMDb id to full metadata. Both the movie and the
 // series catalogs are consulted because miniseries are sometimes mistyped
 // on one side; records whose own id doesn't match the request are rejected,
-// and of the survivors the richer, type-consistent record wins.
+// and of the survivors the richer record wins. Richness must be granular:
+// Cinemeta occasionally serves a full-looking but wrong record under the
+// same id in the other catalog (e.g. tt32379268 is "Jamnapaar" as a series
+// but "The Interview" as a movie, with identical id-based poster URLs),
+// so a coarse poster/genres/cast tie keeps whichever catalog was asked
+// first. Episode videos, background art, credits and release info break
+// such ties toward the true record.
 func FetchMeta(tt string) (*Info, error) {
 	type result struct {
 		asked string
@@ -92,11 +98,32 @@ func FetchMeta(tt string) (*Info, error) {
 		if r.meta.Poster != "" {
 			score++
 		}
+		if r.meta.Background != "" {
+			score++
+		}
+		if strings.TrimSpace(r.meta.Description) != "" {
+			score++
+		}
 		if len(r.meta.Genres) > 0 {
 			score++
 		}
 		if len(r.meta.Cast) > 0 {
 			score++
+		}
+		if len(r.meta.Director) > 0 || len(r.meta.Writer) > 0 {
+			score++
+		}
+		if strings.TrimSpace(r.meta.ReleaseInfo) != "" || strings.TrimSpace(r.meta.Year) != "" {
+			score++
+		}
+		if strings.TrimSpace(r.meta.Runtime) != "" {
+			score++
+		}
+		if strings.TrimSpace(r.meta.ImdbRating) != "" {
+			score++
+		}
+		if len(r.meta.Videos) > 0 {
+			score += 2 // series-only signal; stubs never carry episodes
 		}
 		if r.meta.Type == r.asked {
 			score++
@@ -125,6 +152,7 @@ type cineMeta struct {
 	Writer       []string `json:"writer"`
 	ImdbRating   string   `json:"imdbRating"`
 	Cert         *string  `json:"certification"`
+	Videos       []any    `json:"videos"`
 }
 
 func (m *cineMeta) info(tt string) *Info {

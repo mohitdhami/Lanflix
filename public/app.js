@@ -418,12 +418,15 @@ async function viewHome() {
     refineHeroFromDetail(h);
   };
   if (hero) paintHero(hero);
-  // rotate hero every 9s
+  // rotate hero every 9s — but never rebuild it under the user's cursor:
+  // swapping innerHTML mid-click silently eats the click (and focus).
   clearInterval(window.__heroT);
   if (rows.hero.length > 1) window.__heroT = setInterval(() => {
-    if (S.view !== 'home' || $('#player-root').innerHTML) return;
+    if (S.view !== 'home' || $('#player-root').innerHTML || $('#modal-root').innerHTML) return;
+    const heroEl = $('#hero');
+    if (heroEl && (heroEl.matches(':hover') || heroEl.contains(document.activeElement))) return;
     S.heroIdx = (S.heroIdx + 1) % Math.min(20, rows.hero.length);
-    const h = rows.hero[S.heroIdx]; if (h && $('#hero')) paintHero(h);
+    const h = rows.hero[S.heroIdx]; if (h && heroEl) paintHero(h);
   }, 9000);
   bindCards();
   $$('#view [data-explore]').forEach(e => e.onclick = () => { S.search = ''; S.searchGenre = ''; nav('search'); });
@@ -1806,7 +1809,7 @@ async function viewAdmin() {
     } else if (t === 'content') {
       const { items } = await api('/api/admin/content');
       main.innerHTML = `
-        <h1 style="font-size:22px;margin-bottom:14px">Content <span class="pill">${items.length}</span></h1>
+        <h1 style="font-size:22px;margin-bottom:14px">Content <span class="pill">${items.length}</span> <span class="pill" id="feat-count" title="Featured spots used"></span></h1>
         <div style="display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap;align-items:center">
           <button class="btn btn-red btn-sm focusable" id="c-add">＋ Add title</button>
           <span style="font-size:12.5px;color:#888">Files on disk? Use Rescan — or drop a folder below.</span>
@@ -1826,7 +1829,7 @@ async function viewAdmin() {
         <div class="panel" style="overflow-x:auto"><table id="ctbl"><tr><th>Title</th><th>Type</th><th>Year</th><th>Genres</th><th>Plays</th><th>Featured</th><th>Video?</th><th>Actions</th></tr>
           ${items.map(c => `<tr data-t="${esc(c.title.toLowerCase())}"><td style="max-width:200px"><b>${esc(c.title)}</b><br><span style="color:#888;font-size:12px">${esc((c.description || '').slice(0, 60))}</span></td>
             <td><span class="pill">${c.type}</span></td><td>${c.year || '—'}</td><td style="max-width:150px">${esc((c.genres || []).join(', '))}</td><td>${c.views_count}</td>
-            <td>${c.is_featured ? '⭐' : ''}</td><td>${c.video_path ? '💾 local' : c.remote_url ? '🌐 demo' : '❌ none'}</td>
+            <td><span class="feat-star ${c.is_featured ? 'on' : ''}" data-feat="${c.id}" title="${c.is_featured ? 'Featured — click to unfeature' : 'Not featured — click to feature'}">${c.is_featured ? '⭐' : '☆'}</span></td><td>${c.video_path ? '💾 local' : c.remote_url ? '🌐 demo' : '❌ none'}</td>
             <td><div style="display:flex;gap:6px;flex-wrap:wrap"><button class="btn btn-ghost btn-sm" data-cedit="${c.id}">Edit</button><button class="btn btn-ghost btn-sm" data-cdel="${c.id}">Delete</button></div></td></tr>`).join('')}</table></div>`;
       $('#c-add').onclick = () => {
         const f = $('#c-add-form');
@@ -1847,7 +1850,6 @@ async function viewAdmin() {
           <input id="n-cast" class="tbl-input focusable" placeholder="Cast (comma separated)" />
           <input id="n-director" class="tbl-input focusable" placeholder="Director" />
           <input id="n-maturity" class="tbl-input focusable" placeholder="Maturity (default U/A 13+)" />
-          <label style="font-size:12px;color:#bbb;display:flex;gap:6px;align-items:center"><input type="checkbox" id="n-feat" /> Featured (hero)</label>
           </div><div style="margin-top:10px;display:flex;gap:8px">
           <button class="btn btn-red btn-sm focusable" id="n-go">Create</button>
           <button class="btn btn-ghost btn-sm" id="n-cancel">Cancel</button></div></div>`;
@@ -1879,8 +1881,7 @@ async function viewAdmin() {
               type: $('#n-type').value, title, description: $('#n-desc').value, year: parseInt($('#n-year').value) || null,
               remote_url: $('#n-remote').value.trim(), trailer_url: $('#n-trailer').value.trim(), genres: $('#n-genres').value, cast: $('#n-cast').value,
               director: $('#n-director').value, maturity_rating: $('#n-maturity').value.trim() || 'U/A 13+',
-              poster_path: imdbPick?.poster_path || '', backdrop_path: imdbPick?.backdrop_path || '', imdb_id: imdbPick?.imdb_id || '',
-              is_featured: $('#n-feat').checked }) });
+              poster_path: imdbPick?.poster_path || '', backdrop_path: imdbPick?.backdrop_path || '', imdb_id: imdbPick?.imdb_id || '' }) });
             toast('Created — now add posters/episodes via Edit'); viewAdmin();
           } catch (e) { toast(e.message); }
         };
@@ -1953,6 +1954,34 @@ async function viewAdmin() {
         await api('/api/admin/content/' + b.dataset.cdel, { method: 'DELETE' });
         viewAdmin();
       });
+      // Featured is toggled ONLY via the table star — capped at 20/20.
+      // The counter paints live; the server re-checks so a 21st title can
+      // never slip in, even across sessions.
+      let featCount = items.filter(x => x.is_featured).length;
+      const paintFeatCount = () => {
+        const el = $('#feat-count');
+        if (el) {
+          el.textContent = `⭐ ${featCount}/20`;
+          el.classList.toggle('full', featCount >= 20);
+          el.title = featCount >= 20 ? 'Featured is full — unfeature a title to free a spot' : `${20 - featCount} featured spot(s) left`;
+        }
+        $('#ctbl')?.classList.toggle('feat-full', featCount >= 20);
+      };
+      paintFeatCount();
+      $$('[data-feat]', main).forEach(s => s.onclick = async () => {
+        const c = items.find(x => x.id == s.dataset.feat);
+        if (!c.is_featured && featCount >= 20) return toast('Featured is full (20/20) — unfeature a title first');
+        try {
+          await api('/api/admin/content/' + c.id, { method: 'PUT', body: JSON.stringify({ is_featured: !c.is_featured }) });
+          c.is_featured = !c.is_featured ? 1 : 0;
+          featCount += c.is_featured ? 1 : -1;
+          paintFeatCount();
+          s.textContent = c.is_featured ? '⭐' : '☆';
+          s.classList.toggle('on', !!c.is_featured);
+          s.title = c.is_featured ? 'Featured — click to unfeature' : 'Not featured — click to feature';
+          toast(c.is_featured ? `⭐ Featured: ${c.title} (${featCount}/20)` : `☆ Unfeatured: ${c.title} (${featCount}/20)`);
+        } catch (e) { toast(e.message); }
+      });
       $$('[data-cedit]', main).forEach(b => b.onclick = async () => {
         const c = items.find(x => x.id == b.dataset.cedit);
         // Edit opens in a 90%-window modal card (not inline). All field IDs
@@ -1979,7 +2008,6 @@ async function viewAdmin() {
           <input class="tbl-input full" id="f-g-${c.id}" value="${esc((c.genres || []).join(', '))}" placeholder="Genres (comma)" />
           <input class="tbl-input full" id="f-c-${c.id}" value="${esc((c.cast || []).join(', '))}" placeholder="Cast (comma)" />
           <input class="tbl-input" id="f-dir-${c.id}" value="${esc(c.director || '')}" placeholder="Director" />
-          <label style="font-size:12px;color:#bbb;display:flex;gap:6px;align-items:center"><input type="checkbox" id="f-f-${c.id}" ${c.is_featured ? 'checked' : ''}/> Featured (hero)</label>
           <input class="tbl-input full" id="f-r-${c.id}" value="${esc(c.remote_url || '')}" placeholder="Direct video URL (.mp4 — movies)" />
           <input class="tbl-input full" id="f-tr-${c.id}" value="${esc(c.trailer_url || '')}" placeholder="Trailer URL (optional)" />
           <div class="full" style="display:flex;gap:6px">
@@ -2067,7 +2095,7 @@ async function viewAdmin() {
         $('#f-go-' + c.id).onclick = async () => {
           const genres = $('#f-g-' + c.id).value.split(',').map(s => s.trim()).filter(Boolean);
           const cast = $('#f-c-' + c.id).value.split(',').map(s => s.trim()).filter(Boolean);
-          await api('/api/admin/content/' + c.id, { method: 'PUT', body: JSON.stringify({ title: $('#f-t-' + c.id).value, year: parseInt($('#f-y-' + c.id).value) || null, maturity_rating: $('#f-m-' + c.id).value, description: $('#f-d-' + c.id).value, genres, cast, director: $('#f-dir-' + c.id).value, remote_url: $('#f-r-' + c.id).value.trim(), trailer_url: $('#f-tr-' + c.id).value.trim(), poster_path: c.poster_path || '', backdrop_path: c.backdrop_path || '', imdb_id: c.imdb_id || '', is_featured: $('#f-f-' + c.id).checked }) });
+          await api('/api/admin/content/' + c.id, { method: 'PUT', body: JSON.stringify({ title: $('#f-t-' + c.id).value, year: parseInt($('#f-y-' + c.id).value) || null, maturity_rating: $('#f-m-' + c.id).value, description: $('#f-d-' + c.id).value, genres, cast, director: $('#f-dir-' + c.id).value, remote_url: $('#f-r-' + c.id).value.trim(), trailer_url: $('#f-tr-' + c.id).value.trim(), poster_path: c.poster_path || '', backdrop_path: c.backdrop_path || '', imdb_id: c.imdb_id || '' }) });
           const pf = $('#f-p-' + c.id).files[0], bf = $('#f-b-' + c.id).files[0];
           if (pf || bf) {
             const fd = new FormData();
