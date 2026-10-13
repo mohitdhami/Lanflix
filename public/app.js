@@ -590,7 +590,7 @@ const AudioFX = (() => {
   try { Object.assign(S_fx, JSON.parse(localStorage.getItem('lanflix_fx') || '{}')); } catch {}
   try { const v = parseFloat(localStorage.getItem('lanflix_vol')); if (Number.isFinite(v)) S_fx.vol = Math.max(0, Math.min(2, v)); } catch {}
   let ctx = null, src = null, curVid = null;
-  let input, bass, mid, treble, comp, dry, convolver, wet, master, analyser;
+  let input, bass, mid, treble, comp, nightMakeup, dry, convolver, wet, master, limiter, analyser;
   const PRESETS = {
     studio: { dur: 0.7, decay: 2.6, label: 'Studio — tight' },
     room: { dur: 1.4, decay: 2.1, label: 'Room — natural' },
@@ -622,15 +622,22 @@ const AudioFX = (() => {
     mid = ctx.createBiquadFilter(); mid.type = 'peaking'; mid.frequency.value = 2000; mid.Q.value = 0.9;
     treble = ctx.createBiquadFilter(); treble.type = 'highshelf'; treble.frequency.value = 7500;
     comp = ctx.createDynamicsCompressor();
+    nightMakeup = ctx.createGain(); nightMakeup.gain.value = 1;
     dry = ctx.createGain();
     convolver = ctx.createConvolver();
     wet = ctx.createGain();
     master = ctx.createGain();
+    // Brickwall peak limiter: catches makeup + volume-boost peaks so night
+    // mode tames instead of amplifying. Always on, transparent at normal level.
+    limiter = ctx.createDynamicsCompressor();
+    limiter.threshold.value = -6; limiter.knee.value = 0;
+    limiter.ratio.value = 20; limiter.attack.value = 0.002; limiter.release.value = 0.1;
     analyser = ctx.createAnalyser(); analyser.fftSize = 64; analyser.smoothingTimeConstant = 0.78;
     input.connect(bass); bass.connect(mid); mid.connect(treble); treble.connect(comp);
-    comp.connect(dry); dry.connect(master);
-    comp.connect(convolver); convolver.connect(wet); wet.connect(master);
-    master.connect(analyser); analyser.connect(ctx.destination);
+    comp.connect(nightMakeup);
+    nightMakeup.connect(dry); dry.connect(master);
+    nightMakeup.connect(convolver); convolver.connect(wet); wet.connect(master);
+    master.connect(limiter); limiter.connect(analyser); analyser.connect(ctx.destination);
   }
   function applyAll() {
     if (!ctx) return;
@@ -643,15 +650,18 @@ const AudioFX = (() => {
     bass.gain.setTargetAtTime(low, t, 0.05);
     mid.gain.setTargetAtTime(m, t, 0.05);
     treble.gain.setTargetAtTime(high, t, 0.05);
-    // night mode: aggressive compression for even loud scenes
+    // night mode: true leveling — squash loud scenes, lift dialogue with a
+    // fixed makeup gain, then brickwall-limit peaks so it tames (never louder).
     if (S_fx.night) {
-      comp.threshold.setTargetAtTime(-30, t, 0.05); comp.knee.setTargetAtTime(12, t, 0.05);
-      comp.ratio.setTargetAtTime(14, t, 0.05); comp.attack.setTargetAtTime(0.003, t, 0.05);
-      comp.release.setTargetAtTime(0.28, t, 0.05);
+      comp.threshold.setTargetAtTime(-24, t, 0.05); comp.knee.setTargetAtTime(4, t, 0.05);
+      comp.ratio.setTargetAtTime(12, t, 0.05); comp.attack.setTargetAtTime(0.004, t, 0.05);
+      comp.release.setTargetAtTime(0.2, t, 0.05);
+      nightMakeup.gain.setTargetAtTime(1.78, t, 0.05); // +5dB dialogue lift
     } else {
       comp.threshold.setTargetAtTime(-14, t, 0.05); comp.knee.setTargetAtTime(24, t, 0.05);
       comp.ratio.setTargetAtTime(3, t, 0.05); comp.attack.setTargetAtTime(0.008, t, 0.05);
       comp.release.setTargetAtTime(0.24, t, 0.05);
+      nightMakeup.gain.setTargetAtTime(1, t, 0.05);
     }
     // reverb
     dry.gain.setTargetAtTime(S_fx.reverb ? 1 - S_fx.reverbAmt * 0.35 : 1, t, 0.05);
@@ -801,7 +811,7 @@ async function playContent(contentId, episodeId = null) {
         </div>
         <div class="fx-row" id="fx-row-vocal"><div class="fx-ico">🎙️</div><div class="fx-meta"><b>Vocal clarity</b><span>Boost dialogue +7dB @ 2kHz</span></div><button class="switch" id="fx-vocal" aria-label="Vocal"></button></div>
         <div class="fx-row" id="fx-row-inst"><div class="fx-ico">🎸</div><div class="fx-meta"><b>Instrument / Music</b><span>V-shape: bass + treble lift</span></div><button class="switch" id="fx-inst" aria-label="Instrument"></button></div>
-        <div class="fx-row" id="fx-row-night"><div class="fx-ico">🌙</div><div class="fx-meta"><b>Night mode</b><span>Tame loud scenes</span></div><button class="switch" id="fx-night" aria-label="Night"></button></div>
+        <div class="fx-row" id="fx-row-night"><div class="fx-ico">💬</div><div class="fx-meta"><b>Dialogue Boost</b><span>Level loud scenes, lift voices</span></div><button class="switch" id="fx-night" aria-label="Dialogue Boost"></button></div>
         <div class="fx-foot"><button id="fx-reset">Reset FX</button><button id="fx-done">Done</button></div>
       </div>
     </div>
@@ -1056,7 +1066,7 @@ async function playContent(contentId, episodeId = null) {
   bindSwitch('fx-reverb', 'reverb', '🏛️ Reverb');
   bindSwitch('fx-vocal', 'vocal', '🎙️ Vocal clarity');
   bindSwitch('fx-inst', 'inst', '🎸 Instrument');
-  bindSwitch('fx-night', 'night', '🌙 Night mode');
+  bindSwitch('fx-night', 'night', '💬 Dialogue Boost');
   $p('fx-rev-amt').oninput = (e) => { AudioFX.set('reverbAmt', parseFloat(e.target.value)); paintFx(); wake(); };
   $p('fx-rev-preset').onchange = (e) => { AudioFX.set('reverbPreset', e.target.value); toast('Reverb: ' + e.target.selectedOptions[0].text); wake(); };
   $p('fx-vol').oninput = (e) => { setVol(parseFloat(e.target.value), { silent: true }); paintFx(); wake(); };
