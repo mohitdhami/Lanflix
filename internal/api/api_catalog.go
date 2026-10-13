@@ -137,6 +137,21 @@ func contentQuery(kf string, extra, order string, lim int) []map[string]any {
 	return out
 }
 
+// attachResume adds resume_at/resume_of/resume_episode to browse items based on
+// the profile's unfinished watch_history (most recent per content). This lets
+// the home hero (and other rows) render Play vs Resume per title, mirroring
+// the detail modal's canResume logic (position > 10, not completed).
+func attachResume(items []map[string]any, byContent map[int64]map[string]any) {
+	for _, c := range items {
+		id := intVal(c["id"])
+		if w, ok := byContent[id]; ok {
+			c["resume_at"] = intVal(w["position_sec"])
+			c["resume_of"] = intVal(w["duration_sec"])
+			c["resume_episode"] = w["episode_id"]
+		}
+	}
+}
+
 func getBrowseRows(w http.ResponseWriter, r *http.Request) {
 	pid, ok := optionalProfile(w, r, nil)
 	if !ok {
@@ -176,6 +191,9 @@ func getBrowseRows(w http.ResponseWriter, r *http.Request) {
 	if len(top10) > 10 {
 		top10 = top10[:10]
 	}
+	fresh := q("", "added_at DESC", 12)
+	movies := q("AND type='movie'", "views_count DESC", 12)
+	series := q("AND type='series'", "views_count DESC", 12)
 	genreRows := []map[string]any{}
 	for _, g := range []string{"Drama", "Comedy", "Action", "Sci-Fi", "Thriller", "Romance", "Animation"} {
 		rows, _ := db.QueryMap(`SELECT * FROM content WHERE genres LIKE ? `+kf+` ORDER BY views_count DESC LIMIT 10`, "%"+g+"%")
@@ -187,12 +205,38 @@ func getBrowseRows(w http.ResponseWriter, r *http.Request) {
 			genreRows = append(genreRows, map[string]any{"title": g, "genre": g, "items": items})
 		}
 	}
+	// Enrich hero + rows with per-title resume status so the featured
+	// section can show Play vs Resume (movies: movie progress, series:
+	// most-recently-watched unfinished episode).
+	if pid != 0 {
+		wrows, _ := db.QueryMap(`SELECT content_id, episode_id, position_sec, duration_sec FROM watch_history WHERE profile_id=? AND completed=0 AND position_sec > 5 ORDER BY updated_at DESC`, pid)
+		byContent := map[int64]map[string]any{}
+		for _, wr := range wrows {
+			cid := intVal(wr["content_id"])
+			if _, seen := byContent[cid]; !seen {
+				byContent[cid] = wr
+			}
+		}
+		if len(byContent) > 0 {
+			attachResume(hero, byContent)
+			attachResume(trending, byContent)
+			attachResume(fresh, byContent)
+			attachResume(movies, byContent)
+			attachResume(series, byContent)
+			attachResume(myList, byContent)
+			for _, g := range genreRows {
+				if items, ok := g["items"].([]map[string]any); ok {
+					attachResume(items, byContent)
+				}
+			}
+		}
+	}
 	J(w, 200, map[string]any{
 		"hero": hero, "continue": continueItems, "myList": myList,
 		"trending": trending, "top10": top10,
-		"fresh": q("", "added_at DESC", 12),
-		"movies": q("AND type='movie'", "views_count DESC", 12),
-		"series": q("AND type='series'", "views_count DESC", 12),
+		"fresh": fresh,
+		"movies": movies,
+		"series": series,
 		"genreRows": genreRows,
 	})
 }

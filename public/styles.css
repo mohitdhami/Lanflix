@@ -94,6 +94,10 @@ a{color:inherit}
 .badge.green{color:var(--green);border-color:var(--green)}
 .hero-desc{color:#e8e8e8;font-size:15px;line-height:1.55;margin-bottom:20px;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden;text-shadow:0 1px 6px rgba(0,0,0,.7)}
 .hero-btns{display:flex;gap:12px;flex-wrap:wrap}
+.hero-progress{margin-top:14px;max-width:340px}
+.hero-progress-track{height:4px;background:rgba(255,255,255,.3);border-radius:2px;overflow:hidden;margin-bottom:6px}
+.hero-progress-track i{display:block;height:100%;background:var(--red)}
+.hero-progress span{font-size:12.5px;color:#ddd;text-shadow:0 1px 6px rgba(0,0,0,.7)}
 .btn-play{background:#fff;color:#000;font-size:16px;padding:12px 28px;border-radius:5px}
 .btn-play:hover{background:rgba(255,255,255,.75)}
 .btn-info{background:rgba(109,109,110,.7);color:#fff;font-size:16px;padding:12px 24px;border-radius:5px}

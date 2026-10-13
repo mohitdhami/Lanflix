@@ -296,6 +296,7 @@ async function viewHome() {
     api('/api/genres').catch(() => ({ genres: [] })),
   ]);
   S.rows = rows; S.genres = genres.genres || [];
+  S._heroDetail = {};
   if (!rows) { $('#view').innerHTML = `<div class="page"><div class="empty">No content yet. Admin → Rescan after adding files to <code>media/</code>.</div></div>`; return; }
   const hero = rows.hero[0] || rows.trending[0];
   S.heroIdx = 0;
@@ -312,7 +313,75 @@ async function viewHome() {
       <div class="row"><h2>📺 TV Shows</h2><div class="rail">${(rows.series || []).map(c => hCard(c, false, true)).join('')}</div></div>
       ${(rows.genreRows || []).map(g => `<div class="row"><h2>${esc(g.title)} <span class="explore" data-genre="${esc(g.genre)}">Explore all ›</span></h2><div class="rail">${g.items.map(c => hCard(c)).join('')}</div></div>`).join('')}
     </div>`;
+  // Featured hero respects per-title watch status (movies: movie progress,
+  // series: most-recent unfinished episode) — same thresholds as detail modal.
+  const heroResumeState = (h) => {
+    const pos = Number(h.resume_at || h.progress?.position_sec || 0);
+    const dur = Number(h.resume_of || h.progress?.duration_sec || 0);
+    const ep = h.resume_episode ?? null;
+    if (dur > 0 && pos > 10) {
+      const pct = Math.min(100, Math.round((pos / dur) * 100));
+      return { canResume: true, episodeId: ep, pos, dur, pct };
+    }
+    if (h.progress && h.progress.position_sec > 10 && !h.progress.completed) {
+      const p = Number(h.progress.position_sec || 0), d = Number(h.progress.duration_sec || 0);
+      return { canResume: true, episodeId: null, pos: p, dur: d, pct: d ? Math.min(100, Math.round((p / d) * 100)) : 0 };
+    }
+    return { canResume: false, episodeId: null, pos: 0, dur: 0, pct: 0 };
+  };
+  const refineHeroFromDetail = (h) => {
+    // Background upgrade: browse rows carry the most-recent unfinished entry,
+    // but the detail endpoint is the source of truth (esp. series episode).
+    // If it disagrees, patch the hero button in place + cache onto the row.
+    const id = h.id;
+    if (S._heroDetail?.[id] !== undefined) return;
+    S._heroDetail = S._heroDetail || {};
+    S._heroDetail[id] = true;
+    api(`/api/content/${id}?profileId=${pid}`).then(({ item: c }) => {
+      const eps = c.episodes || [];
+      const resumeEp = eps.filter(e => e.watch && !e.watch.completed && e.watch.position_sec > 5)
+        .sort((a, b) => String(b.watch.updated_at).localeCompare(String(a.watch.updated_at)))[0]
+        || eps.find(e => !(e.watch && e.watch.completed)) || eps[0];
+      const canResume = c.type === 'movie'
+        ? !!(c.progress && c.progress.position_sec > 10 && !c.progress.completed)
+        : !!(resumeEp && resumeEp.watch && resumeEp.watch.position_sec > 10 && !resumeEp.watch.completed);
+      const epId = c.type === 'series' && canResume && resumeEp ? resumeEp.id : null;
+      const pos = c.type === 'movie'
+        ? Number(c.progress?.position_sec || 0)
+        : Number(resumeEp?.watch?.position_sec || 0);
+      const dur = c.type === 'movie'
+        ? Number(c.progress?.duration_sec || 0)
+        : Number(resumeEp?.watch?.duration_sec || 0);
+      // cache back onto the browse row so rotations don't flicker
+      if (canResume) {
+        h.resume_at = pos; h.resume_of = dur;
+        if (epId) h.resume_episode = epId;
+        if (c.type === 'movie' && c.progress) h.progress = c.progress;
+      } else {
+        h.resume_at = 0; h.resume_of = 0; h.resume_episode = null;
+      }
+      // only patch if this hero is still on screen
+      if (S.view !== 'home' || !$('#hero-play')) return;
+      const cur = rows.hero[S.heroIdx];
+      if (!cur || cur.id !== id) return;
+      const btn = $('#hero-play');
+      const want = canResume ? '▶ Resume' : '▶ Play';
+      if (btn.textContent !== want) btn.textContent = want;
+      btn.onclick = () => playContent(id, epId || undefined);
+      const prog = $('#hero-progress');
+      if (canResume && dur > 0 && prog) {
+        prog.style.display = 'block';
+        const bar = prog.querySelector('i');
+        if (bar) bar.style.width = Math.min(100, Math.round((pos / dur) * 100)) + '%';
+        const lab = prog.querySelector('span');
+        if (lab) lab.textContent = `Resume from ${fmtTime(pos)} of ${fmtTime(dur)}`;
+      } else if (!canResume && prog) {
+        prog.style.display = 'none';
+      }
+    }).catch(() => { S._heroDetail[id] = undefined; });
+  };
   const paintHero = (h) => {
+    const r = heroResumeState(h);
     $('#hero').innerHTML = `
       <div class="hero-bg" style="background-image:url('${esc(h.backdrop || h.poster)}')"></div>
       <div class="hero-content">
@@ -321,14 +390,16 @@ async function viewHome() {
         <div class="hero-meta"><span class="green">${Math.round(70 + (h.views_count % 28))}% Match</span><span>${h.year || ''}</span><span class="badge">${esc(h.maturity_rating || 'U/A 13+')}</span><span>${h.type === 'movie' ? fmtDur(h.duration_sec) : (h.genres?.join(', ') || '')}</span><span class="badge green">Top 10</span></div>
         <div class="hero-desc">${esc(h.description || 'No description yet.')}</div>
         <div class="hero-btns">
-          <button class="btn btn-play focusable" id="hero-play">▶ Play</button>
+          <button class="btn btn-play focusable" id="hero-play">▶ ${r.canResume ? 'Resume' : 'Play'}</button>
           <button class="btn btn-info focusable" id="hero-info">ⓘ More Info</button>
         </div>
+        <div class="hero-progress" id="hero-progress" style="display:${r.canResume && r.dur ? 'block' : 'none'}"><div class="hero-progress-track"><i style="width:${r.pct}%"></i></div>${r.canResume && r.dur ? `<span>Resume from ${fmtTime(r.pos)} of ${fmtTime(r.dur)}</span>` : '<span></span>'}</div>
         <div class="hero-dots">${rows.hero.slice(0, 5).map((_, i) => `<span class="${i === S.heroIdx ? 'on' : ''}" data-dot="${i}"></span>`).join('')}</div>
       </div>`;
-    $('#hero-play').onclick = () => playContent(h.id);
+    $('#hero-play').onclick = () => playContent(h.id, r.episodeId || undefined);
     $('#hero-info').onclick = () => openDetail(h.id);
     $$('#hero [data-dot]').forEach(d => d.onclick = () => { S.heroIdx = +d.dataset.dot; paintHero(rows.hero[S.heroIdx]); });
+    refineHeroFromDetail(h);
   };
   if (hero) paintHero(hero);
   // rotate hero every 9s
