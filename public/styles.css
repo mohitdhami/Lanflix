@@ -82,7 +82,7 @@ a{color:inherit}
 .icon-btn:hover{background:rgba(255,255,255,.12)}
 
 /* ---------- hero ---------- */
-.hero{position:relative;min-height:86vh;display:flex;align-items:flex-end;padding:calc(var(--nav-h) + 20px) 4vw 60px;overflow:hidden}
+.hero{position:relative;min-height:86vh;display:flex;align-items:flex-end;padding:calc(var(--nav-h) + 20px) 4vw 110px;overflow:hidden}
 .hero-bg{position:absolute;inset:0;background-size:cover;background-position:center;filter:brightness(.9)}
 .hero::after{content:'';position:absolute;inset:0;background:linear-gradient(90deg,rgba(20,20,20,.92) 0%,rgba(20,20,20,.55) 45%,transparent 75%),linear-gradient(transparent 55%,var(--bg) 100%)}
 .hero-content{position:relative;z-index:2;max-width:560px}
@@ -94,7 +94,7 @@ a{color:inherit}
 .badge.green{color:var(--green);border-color:var(--green)}
 .hero-desc{color:#e8e8e8;font-size:15px;line-height:1.55;margin-bottom:20px;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden;text-shadow:0 1px 6px rgba(0,0,0,.7)}
 .hero-btns{display:flex;gap:12px;flex-wrap:wrap}
-.hero-progress{margin-top:14px;max-width:340px}
+.hero-progress{margin-top:16px;margin-bottom:2px;max-width:340px}
 .hero-progress-track{height:4px;background:rgba(255,255,255,.3);border-radius:2px;overflow:hidden;margin-bottom:6px}
 .hero-progress-track i{display:block;height:100%;background:var(--red)}
 .hero-progress span{font-size:12.5px;color:#ddd;text-shadow:0 1px 6px rgba(0,0,0,.7)}
@@ -102,7 +102,7 @@ a{color:inherit}
 .btn-play:hover{background:rgba(255,255,255,.75)}
 .btn-info{background:rgba(109,109,110,.7);color:#fff;font-size:16px;padding:12px 24px;border-radius:5px}
 .btn-info:hover{background:rgba(109,109,110,.45)}
-.hero-dots{display:flex;gap:6px;margin-top:18px}
+.hero-dots{display:flex;gap:6px;margin-top:20px;margin-bottom:10px;padding-bottom:2px}
 .hero-dots span{width:22px;height:3px;background:#555;border-radius:2px;cursor:pointer}
 .hero-dots span.on{background:#fff}
 /* ---------- view slider transitions (page switch, not refresh) ---------- */
@@ -118,12 +118,13 @@ body.navigating .nav-links{pointer-events:none;opacity:.75}
 .skel::after{content:'';position:absolute;inset:0;background:linear-gradient(100deg,transparent 30%,rgba(255,255,255,.09) 50%,transparent 70%);animation:shimmer 1.25s infinite}
 @keyframes shimmer{from{transform:translateX(-100%)}to{transform:translateX(100%)}}
 /* ---------- rows ---------- */
-.rows{position:relative;z-index:3;margin-top:-90px;padding-bottom:60px}
-.row{margin:22px 0;padding-left:4vw}
-.row h2{font-size:19px;font-weight:600;margin-bottom:10px;color:#e5e5e5;display:flex;align-items:center;gap:10px}
+.rows{position:relative;z-index:3;margin-top:-70px;padding-bottom:60px}
+.rows > .row:first-child{margin-top:10px}
+.row{margin:24px 0 26px;padding-left:4vw}
+.row h2{font-size:19px;font-weight:600;margin-bottom:12px;color:#e5e5e5;display:flex;align-items:center;gap:10px}
 .row h2 .explore{font-size:12px;color:#54b9c5;cursor:pointer;display:none}
 .row:hover h2 .explore{display:inline}
-.rail{display:flex;gap:10px;overflow-x:auto;padding:10px 4vw 18px 0;scroll-behavior:smooth;scrollbar-width:none}
+.rail{display:flex;gap:12px;overflow-x:auto;padding:12px 4vw 20px 0;scroll-behavior:smooth;scrollbar-width:none}
 .rail::-webkit-scrollbar{display:none}
 .card{position:relative;flex:0 0 auto;width:172px;border-radius:var(--radius);overflow:hidden;background:var(--card);cursor:pointer;transition:transform .18s ease, box-shadow .18s}
 .card:hover{transform:scale(1.12);z-index:5;box-shadow:0 12px 32px rgba(0,0,0,.6)}
@@ -339,6 +340,10 @@ tr:hover td{background:#202020}
 
 /* ---------- responsive ---------- */
 @media(max-width:900px){
+  .hero{min-height:74vh;padding-bottom:90px}
+  .rows{margin-top:-55px}
+  .rows > .row:first-child{margin-top:8px}
+  .row{margin:20px 0 22px}
   .nav-links{display:none}
   .modal-body{grid-template-columns:1fr;padding:8px 20px 24px}
   .modal-title{left:20px;right:20px}

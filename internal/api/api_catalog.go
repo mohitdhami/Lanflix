@@ -162,17 +162,33 @@ func getBrowseRows(w http.ResponseWriter, r *http.Request) {
 
 	continueItems := []map[string]any{}
 	if pid != 0 {
+		// One card per title: a series can have several unfinished episodes,
+		// but the join below would emit the same content once per episode.
+		// Over-fetch, keep the most recent entry per content (rows are
+		// ordered by updated_at DESC), then trim to 12.
 		rows, _ := db.QueryMap(`
-			SELECT c.*, w.position_sec, w.duration_sec, w.episode_id, w.updated_at FROM watch_history w
+			SELECT c.*, w.content_id AS w_content_id, w.position_sec, w.duration_sec, w.episode_id, w.updated_at FROM watch_history w
 			JOIN content c ON c.id = w.content_id
 			WHERE w.profile_id=? AND w.completed=0 AND w.position_sec > 5
-			ORDER BY w.updated_at DESC LIMIT 12`, pid)
+			ORDER BY w.updated_at DESC LIMIT 30`, pid)
+		seen := map[int64]bool{}
 		for _, rr := range rows {
+			cid := intVal(rr["w_content_id"])
+			if cid == 0 {
+				cid = intVal(rr["id"])
+			}
+			if seen[cid] {
+				continue
+			}
+			seen[cid] = true
 			c := rowContent(rr)
 			c["resume_at"] = intVal(rr["position_sec"])
 			c["resume_of"] = intVal(rr["duration_sec"])
 			c["resume_episode"] = rr["episode_id"]
 			continueItems = append(continueItems, c)
+			if len(continueItems) >= 12 {
+				break
+			}
 		}
 	}
 	myList := []map[string]any{}

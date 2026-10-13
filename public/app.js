@@ -298,6 +298,12 @@ async function viewHome() {
   S.rows = rows; S.genres = genres.genres || [];
   S._heroDetail = {};
   if (!rows) { $('#view').innerHTML = `<div class="page"><div class="empty">No content yet. Admin → Rescan after adding files to <code>media/</code>.</div></div>`; return; }
+  // Safety net: one card per title in Continue Watching (backend already
+  // dedupes; this guards stale/cached payloads).
+  if (Array.isArray(rows.continue)) {
+    const seen = new Set();
+    rows.continue = rows.continue.filter(c => (seen.has(c.id) ? false : (seen.add(c.id), true)));
+  }
   const hero = rows.hero[0] || rows.trending[0];
   S.heroIdx = 0;
   $('#view').innerHTML = `
